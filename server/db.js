@@ -106,3 +106,8 @@ async function initSchema() {
 }
 
 module.exports = { pool, initSchema };
+
+
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle database client (recovered, server keeps running):', err.message);
+});

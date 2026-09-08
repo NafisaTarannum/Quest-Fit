@@ -150,7 +150,7 @@ app.post('/api/signup', ah(async (req, res) => {
   const existingEmail = await one('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
   if (existingEmail) return res.status(409).json({ error: 'An account with that email already exists.' });
 
-  const hash = bcrypt.hashSync(password, 10);
+  const hash = await bcrypt.hash(password, 10);
   const createdAt = Date.now();
 
   const client = await pool.connect();
@@ -188,7 +188,7 @@ app.post('/api/login', ah(async (req, res) => {
   if (!validEmail(email) || !password) return res.status(400).json({ error: 'Enter your email and password.' });
 
   const row = await one('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
-  if (!row || !bcrypt.compareSync(password, row.password_hash)) {
+  if (!row || !(await bcrypt.compare(password, row.password_hash))) {
     return res.status(401).json({ error: 'Incorrect email or password.' });
   }
   const token = createToken(row.id);

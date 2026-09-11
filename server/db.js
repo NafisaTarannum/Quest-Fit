@@ -21,6 +21,19 @@ const pool = new Pool({
     : false,
 });
 
+// IMPORTANT: serverless Postgres providers like Neon can close idle
+// connections on their end at any time (that's part of how they scale
+// down). When that happens to a connection sitting idle in this pool, `pg`
+// emits an 'error' event on the pool object itself - not a promise
+// rejection anyone is awaiting. Without a listener here, Node.js treats
+// that as an uncaught exception and CRASHES THE ENTIRE SERVER PROCESS,
+// dropping every connected user/tab at once and forcing Render to restart
+// the whole container. Attaching this listener lets `pg` quietly discard
+// the broken connection and open a fresh one next time it's needed instead.
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle database client (recovered, server keeps running):', err.message);
+});
+
 async function initSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -106,8 +119,3 @@ async function initSchema() {
 }
 
 module.exports = { pool, initSchema };
-
-
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle database client (recovered, server keeps running):', err.message);
-});

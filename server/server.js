@@ -1,0 +1,596 @@
+const path = require('path');
+const http = require('http');
+const express = require('express');
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const { WebSocketServer } = require('ws');
+const { pool, initSchema } = require('./db');
+
+const SPORTS = [
+  'basketball','football','american-football','tennis','running','cycling',
+  'swimming','volleyball','yoga','golf','boxing','climbing','baseball','hiking','badminton'
+];
+
+const AVATAR_EMOJIS = ['🏅','🔥','⚡','🌟','🚀','🏆','💪','🎯','🌈','🦁','🐺','🐻','🦅','🐢','🌵','🍀'];
+const ACCENT_COLORS = ['#C6FF3D','#FF9F1C','#FF4D6D','#4DA3FF','#B98CFF','#4DFFD2'];
+const TITLES = [
+  '', 'Weekend Warrior', 'Early Riser', 'Gym Rat', 'Trail Blazer', 'Team Captain',
+  'Cardio Junkie', 'Zen Master', 'Adrenaline Seeker', 'Rookie', 'MVP', 'Iron Will', 'Comeback Kid'
+];
+const MAX_BIO_LENGTH = 200;
+const MAX_PHOTO_DATA_URL_LENGTH = 700_000; // ~500KB image, base64-encoded
+const MAX_POST_CAPTION_LENGTH = 200;
+const MAX_POSTS_PER_USER = 24;
+
+const app = express();
+app.use(express.json({ limit: '2mb' })); // photos are sent as base64 JSON, default 100kb limit is too small
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// ---------- tiny query helpers ----------
+async function one(sql, params) { const r = await pool.query(sql, params); return r.rows[0] || null; }
+async function many(sql, params) { const r = await pool.query(sql, params); return r.rows; }
+
+// Wraps an async route handler so a thrown error becomes a 500 response
+// instead of crashing the process or hanging the request.
+function ah(fn) {
+  return (req, res) => fn(req, res).catch(err => {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong on the server.' });
+  });
+}
+
+// In-memory token -> userId map. Each browser TAB holds its own token
+// (in sessionStorage, not a cookie), so multiple tabs in the same browser
+// can be logged in as different accounts at once. Tokens are lost if the
+// server restarts, which just means everyone has to log back in.
+const sessions = new Map();
+
+function createToken(userId) {
+  const token = crypto.randomUUID();
+  sessions.set(token, userId);
+  return token;
+}
+function getUserIdFromReq(req) {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (!token) return null;
+  return sessions.get(token) || null;
+}
+
+// ---------- live chat (WebSocket) ----------
+// Tracks which open sockets belong to which user, so a new chat message can
+// be pushed to the recipient the instant it's sent, without them refreshing.
+const socketsByUser = new Map(); // userId -> Set<ws>
+
+function registerSocket(userId, ws) {
+  if (!socketsByUser.has(userId)) socketsByUser.set(userId, new Set());
+  socketsByUser.get(userId).add(ws);
+}
+function unregisterSocket(userId, ws) {
+  const set = socketsByUser.get(userId);
+  if (!set) return;
+  set.delete(ws);
+  if (set.size === 0) socketsByUser.delete(userId);
+}
+function pushToUser(userId, payload) {
+  const set = socketsByUser.get(userId);
+  if (!set) return;
+  const data = JSON.stringify(payload);
+  for (const ws of set) {
+    if (ws.readyState === ws.OPEN) ws.send(data);
+  }
+}
+
+// ---------- helpers ----------
+function publicUser(row, sports) {
+  return {
+    id: row.id,
+    name: row.name,
+    age: row.age,
+    gender: row.gender,
+    sports,
+    avatarEmoji: row.avatar_emoji || '🏅',
+    avatarColor: row.avatar_color || '#C6FF3D',
+    title: row.title || '',
+    bio: row.bio || '',
+    photoDataUrl: row.photo_data_url || null,
+    joinedAt: row.created_at != null ? Number(row.created_at) : null,
+  };
+}
+async function getSportsForUser(userId) {
+  const rows = await many('SELECT sport_id FROM user_sports WHERE user_id = $1', [userId]);
+  return rows.map(r => r.sport_id);
+}
+function requireAuth(req, res, next) {
+  const userId = getUserIdFromReq(req);
+  if (!userId) return res.status(401).json({ error: 'Not logged in.' });
+  req.userId = userId;
+  next();
+}
+function validEmail(email) {
+  return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+function validPassword(pw) {
+  return typeof pw === 'string' &&
+    pw.length >= 8 &&
+    /[A-Z]/.test(pw) &&
+    /[a-z]/.test(pw) &&
+    /[0-9]/.test(pw) &&
+    /[^A-Za-z0-9]/.test(pw);
+}
+function matchKey(idA, idB) {
+  return idA < idB ? [idA, idB] : [idB, idA];
+}
+async function findMatch(idA, idB) {
+  const [a, b] = matchKey(idA, idB);
+  return one('SELECT * FROM matches WHERE user_a = $1 AND user_b = $2', [a, b]);
+}
+
+// ---------- auth ----------
+app.post('/api/signup', ah(async (req, res) => {
+  const { name, email, password, age, gender, sports } = req.body || {};
+
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Enter a name.' });
+  }
+  if (!validEmail(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+  if (!validPassword(password)) {
+    return res.status(400).json({ error: 'Password needs 8+ characters, an uppercase letter, a lowercase letter, a number, and a symbol.' });
+  }
+  const ageNum = Number(age);
+  if (!ageNum || ageNum < 13 || ageNum > 100) return res.status(400).json({ error: 'Enter a valid age (13-100).' });
+  if (!gender || typeof gender !== 'string') return res.status(400).json({ error: 'Select a gender.' });
+  if (!Array.isArray(sports) || sports.length === 0 || !sports.every(s => SPORTS.includes(s))) {
+    return res.status(400).json({ error: "Pick at least one sport you're interested in." });
+  }
+
+  const cleanName = name.trim();
+  const existingName = await one('SELECT id FROM users WHERE LOWER(name) = LOWER($1)', [cleanName]);
+  if (existingName) return res.status(409).json({ error: 'That name is already taken - try another.' });
+  const existingEmail = await one('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
+  if (existingEmail) return res.status(409).json({ error: 'An account with that email already exists.' });
+
+  const hash = await bcrypt.hash(password, 10);
+  const createdAt = Date.now();
+
+  const client = await pool.connect();
+  let userId;
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      'INSERT INTO users (name, email, password_hash, age, gender, created_at) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
+      [cleanName, email.trim(), hash, ageNum, gender, createdAt]
+    );
+    userId = result.rows[0].id;
+    for (const s of sports) {
+      await client.query('INSERT INTO user_sports (user_id, sport_id) VALUES ($1,$2)', [userId, s]);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const token = createToken(userId);
+  res.json({
+    user: publicUser(
+      { id: userId, name: cleanName, age: ageNum, gender, avatar_emoji: '🏅', avatar_color: '#C6FF3D', title: '', bio: '', photo_data_url: null, created_at: createdAt },
+      sports
+    ),
+    token
+  });
+}));
+
+app.post('/api/login', ah(async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!validEmail(email) || !password) return res.status(400).json({ error: 'Enter your email and password.' });
+
+  const row = await one('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
+  if (!row || !(await bcrypt.compare(password, row.password_hash))) {
+    return res.status(401).json({ error: 'Incorrect email or password.' });
+  }
+  const token = createToken(row.id);
+  res.json({ user: publicUser(row, await getSportsForUser(row.id)), token });
+}));
+
+app.post('/api/logout', (req, res) => {
+  const auth = req.headers.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
+  if (token) sessions.delete(token);
+  res.json({ ok: true });
+});
+
+app.get('/api/me', ah(async (req, res) => {
+  const userId = getUserIdFromReq(req);
+  if (!userId) return res.json({ user: null });
+  const row = await one('SELECT * FROM users WHERE id = $1', [userId]);
+  if (!row) return res.json({ user: null });
+  res.json({ user: publicUser(row, await getSportsForUser(row.id)) });
+}));
+
+app.get('/api/profile-options', (req, res) => {
+  res.json({ avatarEmojis: AVATAR_EMOJIS, accentColors: ACCENT_COLORS, titles: TITLES, maxBioLength: MAX_BIO_LENGTH });
+});
+
+app.post('/api/profile', requireAuth, ah(async (req, res) => {
+  const { bio, avatarEmoji, avatarColor, title, photoDataUrl, removePhoto } = req.body || {};
+
+  if (bio !== undefined && (typeof bio !== 'string' || bio.length > MAX_BIO_LENGTH)) {
+    return res.status(400).json({ error: `Bio must be ${MAX_BIO_LENGTH} characters or fewer.` });
+  }
+  if (avatarEmoji !== undefined && !AVATAR_EMOJIS.includes(avatarEmoji)) {
+    return res.status(400).json({ error: 'Pick a valid avatar.' });
+  }
+  if (avatarColor !== undefined && !ACCENT_COLORS.includes(avatarColor)) {
+    return res.status(400).json({ error: 'Pick a valid color.' });
+  }
+  if (title !== undefined && !TITLES.includes(title)) {
+    return res.status(400).json({ error: 'Pick a valid title.' });
+  }
+  if (photoDataUrl !== undefined && photoDataUrl !== null) {
+    if (typeof photoDataUrl !== 'string' || !/^data:image\/(png|jpeg|jpg|webp);base64,/.test(photoDataUrl)) {
+      return res.status(400).json({ error: 'Invalid photo format.' });
+    }
+    if (photoDataUrl.length > MAX_PHOTO_DATA_URL_LENGTH) {
+      return res.status(400).json({ error: 'That photo is too large - please choose a smaller one.' });
+    }
+  }
+
+  const fields = [];
+  const values = [];
+  let i = 1;
+  if (bio !== undefined) { fields.push(`bio = $${i++}`); values.push(bio.trim()); }
+  if (avatarEmoji !== undefined) { fields.push(`avatar_emoji = $${i++}`); values.push(avatarEmoji); }
+  if (avatarColor !== undefined) { fields.push(`avatar_color = $${i++}`); values.push(avatarColor); }
+  if (title !== undefined) { fields.push(`title = $${i++}`); values.push(title); }
+  if (removePhoto) { fields.push(`photo_data_url = NULL`); }
+  else if (photoDataUrl !== undefined) { fields.push(`photo_data_url = $${i++}`); values.push(photoDataUrl); }
+
+  if (fields.length === 0) return res.status(400).json({ error: 'Nothing to update.' });
+
+  values.push(req.userId);
+  const row = await one(`UPDATE users SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`, values);
+  res.json({ user: publicUser(row, await getSportsForUser(row.id)) });
+}));
+
+// ---------- photo posts ----------
+function publicPost(row) {
+  return { id: row.id, imageDataUrl: row.image_data_url, caption: row.caption || '', createdAt: Number(row.created_at) };
+}
+
+app.get('/api/posts/:name', requireAuth, ah(async (req, res) => {
+  const user = await one('SELECT id FROM users WHERE LOWER(name) = LOWER($1)', [req.params.name]);
+  if (!user) return res.status(404).json({ error: 'Profile not found.' });
+  const rows = await many('SELECT * FROM posts WHERE user_id = $1 ORDER BY created_at DESC', [user.id]);
+  res.json({ posts: rows.map(publicPost) });
+}));
+
+app.post('/api/posts', requireAuth, ah(async (req, res) => {
+  const { imageDataUrl, caption } = req.body || {};
+
+  if (!imageDataUrl || typeof imageDataUrl !== 'string' || !/^data:image\/(png|jpeg|jpg|webp);base64,/.test(imageDataUrl)) {
+    return res.status(400).json({ error: 'Choose a photo to post.' });
+  }
+  if (imageDataUrl.length > MAX_PHOTO_DATA_URL_LENGTH) {
+    return res.status(400).json({ error: 'That photo is too large - please choose a smaller one.' });
+  }
+  if (caption !== undefined && (typeof caption !== 'string' || caption.length > MAX_POST_CAPTION_LENGTH)) {
+    return res.status(400).json({ error: `Caption must be ${MAX_POST_CAPTION_LENGTH} characters or fewer.` });
+  }
+
+  const { count } = await one('SELECT COUNT(*) FROM posts WHERE user_id = $1', [req.userId]);
+  if (Number(count) >= MAX_POSTS_PER_USER) {
+    return res.status(400).json({ error: `You've reached the ${MAX_POSTS_PER_USER}-post limit - delete an old one to add a new one.` });
+  }
+
+  const row = await one(
+    'INSERT INTO posts (user_id, image_data_url, caption, created_at) VALUES ($1,$2,$3,$4) RETURNING *',
+    [req.userId, imageDataUrl, (caption || '').trim(), Date.now()]
+  );
+  res.json({ post: publicPost(row) });
+}));
+
+app.delete('/api/posts/:id', requireAuth, ah(async (req, res) => {
+  const row = await one('SELECT * FROM posts WHERE id = $1', [req.params.id]);
+  if (!row) return res.status(404).json({ error: 'Post not found.' });
+  if (row.user_id !== req.userId) return res.status(403).json({ error: 'You can only delete your own posts.' });
+  await pool.query('DELETE FROM posts WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+// ---------- discover ----------
+app.get('/api/discover', requireAuth, ah(async (req, res) => {
+  const me = await one('SELECT * FROM users WHERE id = $1', [req.userId]);
+  const mySports = await getSportsForUser(me.id);
+
+  const candidates = mySports.length === 0 ? [] : await many(`
+    SELECT DISTINCT u.* FROM users u
+    JOIN user_sports us ON us.user_id = u.id
+    WHERE u.id != $1
+      AND us.sport_id = ANY($2)
+      AND u.id NOT IN (SELECT target_id FROM swipes WHERE user_id = $1)
+      AND NOT EXISTS (
+        SELECT 1 FROM matches m WHERE (m.user_a = $1 AND m.user_b = u.id) OR (m.user_a = u.id AND m.user_b = $1)
+      )
+  `, [req.userId, mySports]);
+
+  const withSports = [];
+  for (const c of candidates) {
+    const cs = await getSportsForUser(c.id);
+    const shared = cs.filter(s => mySports.includes(s));
+    withSports.push({ user: publicUser(c, cs), sharedCount: shared.length });
+  }
+  withSports.sort((a, b) => b.sharedCount - a.sharedCount);
+
+  res.json({ candidates: withSports.map(w => w.user) });
+}));
+
+app.post('/api/swipe', requireAuth, ah(async (req, res) => {
+  const { targetName, action } = req.body || {};
+  if (!['like', 'pass'].includes(action)) return res.status(400).json({ error: 'Invalid action.' });
+
+  const target = await one('SELECT * FROM users WHERE LOWER(name) = LOWER($1)', [targetName || '']);
+  if (!target) return res.status(404).json({ error: 'Profile not found.' });
+
+  await pool.query(`
+    INSERT INTO swipes (user_id, target_id, action, created_at) VALUES ($1,$2,$3,$4)
+    ON CONFLICT (user_id, target_id) DO UPDATE SET action = EXCLUDED.action
+  `, [req.userId, target.id, action, Date.now()]);
+
+  if (action !== 'like') {
+    return res.json({ ok: true, status: 'passed' });
+  }
+
+  const existing = await findMatch(req.userId, target.id);
+  let status;
+
+  if (!existing) {
+    // First request between these two people: create it as pending and
+    // notify the target that someone wants to match with them.
+    const [a, b] = matchKey(req.userId, target.id);
+    await pool.query(
+      'INSERT INTO matches (user_a, user_b, status, requested_by, created_at) VALUES ($1,$2,$3,$4,$5)',
+      [a, b, 'pending', req.userId, Date.now()]
+    );
+    status = 'pending';
+    const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
+    pushToUser(target.id, { type: 'match_request', fromName: me.name });
+  } else if (existing.status === 'pending' && existing.requested_by !== req.userId) {
+    // The other person already requested to match with me - my like
+    // instantly accepts it, same as a mutual match.
+    await pool.query('UPDATE matches SET status = $1 WHERE id = $2', ['accepted', existing.id]);
+    status = 'accepted';
+    const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
+    pushToUser(existing.requested_by, { type: 'match_accepted', withName: me.name });
+  } else {
+    // Already pending (I already requested them) or already accepted.
+    status = existing.status;
+  }
+
+  res.json({
+    ok: true,
+    status,
+    matched: status === 'accepted',
+    match: publicUser(target, await getSportsForUser(target.id))
+  });
+}));
+
+// ---------- search ----------
+app.get('/api/search', requireAuth, ah(async (req, res) => {
+  const { sport, minAge, maxAge, name } = req.query;
+  let rows = await many('SELECT * FROM users WHERE id != $1', [req.userId]);
+
+  rows = rows.filter(u => {
+    if (name && !u.name.toLowerCase().includes(String(name).toLowerCase())) return false;
+    if (minAge && u.age < Number(minAge)) return false;
+    if (maxAge && u.age > Number(maxAge)) return false;
+    return true;
+  });
+
+  const results = [];
+  for (const row of rows) {
+    const sports = await getSportsForUser(row.id);
+    if (sport && !sports.includes(sport)) continue;
+    results.push(publicUser(row, sports));
+  }
+
+  res.json({ results });
+}));
+
+// ---------- matches & chat ----------
+app.get('/api/matches', requireAuth, ah(async (req, res) => {
+  const rows = await many(
+    'SELECT * FROM matches WHERE user_a = $1 OR user_b = $1 ORDER BY created_at DESC',
+    [req.userId]
+  );
+
+  const incoming = [], sent = [], accepted = [];
+  for (const m of rows) {
+    const otherId = m.user_a === req.userId ? m.user_b : m.user_a;
+    const other = await one('SELECT * FROM users WHERE id = $1', [otherId]);
+    const entry = { matchId: m.id, ts: Number(m.created_at), other: publicUser(other, await getSportsForUser(other.id)) };
+
+    if (m.status === 'accepted') accepted.push(entry);
+    else if (m.requested_by === req.userId) sent.push(entry);
+    else incoming.push(entry);
+  }
+  res.json({ incoming, sent, accepted });
+}));
+
+app.post('/api/matches/:matchId/accept', requireAuth, ah(async (req, res) => {
+  const m = await one('SELECT * FROM matches WHERE id = $1', [req.params.matchId]);
+  if (!m || (m.user_a !== req.userId && m.user_b !== req.userId)) {
+    return res.status(404).json({ error: 'Match request not found.' });
+  }
+  if (m.status !== 'pending') return res.status(400).json({ error: 'This request has already been responded to.' });
+  if (m.requested_by === req.userId) return res.status(403).json({ error: "You can't accept your own request." });
+
+  await pool.query('UPDATE matches SET status = $1 WHERE id = $2', ['accepted', m.id]);
+
+  const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
+  pushToUser(m.requested_by, { type: 'match_accepted', withName: me.name });
+
+  res.json({ ok: true });
+}));
+
+app.post('/api/matches/:matchId/decline', requireAuth, ah(async (req, res) => {
+  const m = await one('SELECT * FROM matches WHERE id = $1', [req.params.matchId]);
+  if (!m || (m.user_a !== req.userId && m.user_b !== req.userId)) {
+    return res.status(404).json({ error: 'Match request not found.' });
+  }
+  if (m.status !== 'pending') return res.status(400).json({ error: 'This request has already been responded to.' });
+  if (m.requested_by === req.userId) return res.status(403).json({ error: "You can't decline your own request." });
+
+  await pool.query('DELETE FROM matches WHERE id = $1', [m.id]);
+  // Record it as a pass so this person doesn't reappear in Discover.
+  await pool.query(`
+    INSERT INTO swipes (user_id, target_id, action, created_at) VALUES ($1,$2,'pass',$3)
+    ON CONFLICT (user_id, target_id) DO UPDATE SET action = 'pass'
+  `, [req.userId, m.requested_by, Date.now()]);
+
+  res.json({ ok: true });
+}));
+
+app.get('/api/chat/:name', requireAuth, ah(async (req, res) => {
+  const other = await one('SELECT * FROM users WHERE LOWER(name) = LOWER($1)', [req.params.name]);
+  if (!other) return res.status(404).json({ error: 'Profile not found.' });
+  const m = await findMatch(req.userId, other.id);
+  if (!m || m.status !== 'accepted') return res.status(403).json({ error: 'You are not matched with this person yet.' });
+
+  const messages = await many('SELECT * FROM messages WHERE match_id = $1 ORDER BY created_at ASC', [m.id]);
+  res.json({
+    messages: messages.map(msg => ({
+      from: msg.sender_id === req.userId ? 'me' : 'them',
+      text: msg.body,
+      ts: Number(msg.created_at)
+    }))
+  });
+}));
+
+app.post('/api/chat/:name', requireAuth, ah(async (req, res) => {
+  const { text } = req.body || {};
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Message cannot be empty.' });
+
+  const other = await one('SELECT * FROM users WHERE LOWER(name) = LOWER($1)', [req.params.name]);
+  if (!other) return res.status(404).json({ error: 'Profile not found.' });
+  const m = await findMatch(req.userId, other.id);
+  if (!m || m.status !== 'accepted') return res.status(403).json({ error: 'You are not matched with this person yet.' });
+
+  const ts = Date.now();
+  await pool.query(
+    'INSERT INTO messages (match_id, sender_id, body, created_at) VALUES ($1,$2,$3,$4)',
+    [m.id, req.userId, text.trim(), ts]
+  );
+
+  const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
+  pushToUser(other.id, {
+    type: 'message',
+    withName: me.name,
+    message: { from: 'them', text: text.trim(), ts }
+  });
+
+  res.json({ ok: true, message: { from: 'me', text: text.trim(), ts } });
+}));
+
+const server = http.createServer(app);
+
+const wss = new WebSocketServer({ server, path: '/ws' });
+wss.on('connection', (ws, req) => {
+  const url = new URL(req.url, 'http://localhost');
+  const token = url.searchParams.get('token');
+  const userId = token ? sessions.get(token) : null;
+  if (!userId) { ws.close(4001, 'Unauthorized'); return; }
+
+  ws.userId = userId;
+  registerSocket(userId, ws);
+  ws.on('close', () => unregisterSocket(userId, ws));
+  ws.on('error', () => unregisterSocket(userId, ws));
+});
+
+const PORT = process.env.PORT || 3000;
+initSchema()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`Quest Fit server running at http://localhost:${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error('Failed to set up the database:', err.message);
+    process.exit(1);
+  });
+
+// Render (and most hosts) send SIGTERM to the OLD process during every
+// redeploy, right before starting the new one. Without handling it, the
+// process just dies mid-connection, leaving its database connections
+// dangling on Neon's side until Neon's own idle timeout eventually notices
+// and reaps them - which can take a while. Over many redeploys, those
+// stale connections add up and can contribute to real slowdowns for
+// other requests queuing behind them. This ensures every deploy releases
+// its connections immediately and cleanly instead.
+function shutdown(signal) {
+  console.log(`Received ${signal}, shutting down gracefully...`);
+  for (const sockets of socketsByUser.values()) {
+    for (const ws of sockets) {
+      try { ws.close(1001, 'Server restarting'); } catch (e) {}
+    }
+  }
+  server.close(() => {
+    pool.end()
+      .then(() => {
+        console.log('Database connections closed cleanly.');
+        process.exit(0);
+      })
+      .catch(err => {
+        console.error('Error closing database pool:', err.message);
+        process.exit(1);
+      });
+  });
+  // Safety net: force-exit if graceful shutdown hangs for some reason,
+  // rather than leaving Render waiting indefinitely on a stuck process.
+  setTimeout(() => process.exit(1), 8000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Render (and most hosts) sends SIGTERM to the OLD process a moment before
+// starting the new one on every redeploy. Without handling it, the old
+// process's database connections aren't explicitly closed - they can sit
+// on Neon's side as orphaned/stale connections until Neon's own timeout
+// eventually notices and reaps them. After many redeploys, those add up
+// and can contribute to connections queuing up for real users. Closing
+// everything here releases them immediately instead.
+let shuttingDown = false;
+function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, shutting down gracefully...`);
+
+  for (const sockets of socketsByUser.values()) {
+    for (const ws of sockets) {
+      try { ws.close(1001, 'Server restarting'); } catch (e) {}
+    }
+  }
+
+  server.close(() => {
+    pool.end()
+      .then(() => {
+        console.log('Database pool closed cleanly.');
+        process.exit(0);
+      })
+      .catch(err => {
+        console.error('Error closing database pool:', err.message);
+        process.exit(1);
+      });
+  });
+
+  // Safety net: if something hangs during shutdown, don't let the old
+  // process linger forever and delay the new deploy.
+  setTimeout(() => {
+    console.error('Graceful shutdown timed out, forcing exit.');
+    process.exit(1);
+  }, 8000).unref();
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

@@ -56,6 +56,12 @@ let state = {
   activeChatWith: null,
   chatMessages: [],
   chatLoading: false,
+  meetups: [],
+  meetupsLoading: false,
+  meetupModalOpen: false,
+  meetupForm: null,        // {date, time, location}
+  meetupSaving: false,
+  meetupError: '',
   toast: null,
   profileModalOpen: false,
   profileForm: null,       // {bio, avatarEmoji, avatarColor, title, photoDataUrl}
@@ -70,6 +76,10 @@ let state = {
   addPostForm: null,        // {imageDataUrl, caption}
   addPostSaving: false,
   addPostError: '',
+  allMeetups: [],           // all of my pending/accepted meetups, across every match
+  meetupBannerDismissedId: null,
+  notifPermission: (typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'),
+  notifPromptDismissed: false,
 };
 
 function setState(patch){ state = {...state, ...patch}; render(); }
@@ -77,6 +87,10 @@ function showToast(msg){ setState({toast: msg}); setTimeout(()=>{ if(state.toast
 
 // ---------- live chat (WebSocket) ----------
 let liveSocket = null;
+
+// Meetup reminder timers, keyed by meetup id, so we never double-schedule
+// the same reminder and can cancel them all cleanly on logout.
+const scheduledReminders = new Map();
 
 function connectLive(){
   if(liveSocket){ try{ liveSocket.close(); }catch(e){} liveSocket = null; }
@@ -91,6 +105,9 @@ function connectLive(){
     if(payload.type === 'message') handleIncomingMessage(payload.withName, payload.message);
     else if(payload.type === 'match_request') handleIncomingMatchRequest(payload.fromName);
     else if(payload.type === 'match_accepted') handleMatchAccepted(payload.withName);
+    else if(payload.type === 'meetup_proposed') handleMeetupProposed(payload.withName, payload.meetup);
+    else if(payload.type === 'meetup_accepted') handleMeetupAccepted(payload.withName, payload.meetup);
+    else if(payload.type === 'meetup_declined') handleMeetupDeclined(payload.withName, payload.meetup);
   };
   socket.onclose = () => {
     if(liveSocket === socket) liveSocket = null;
@@ -121,6 +138,102 @@ function handleMatchAccepted(withName){
   showToast(withName+' accepted your match request! You can chat now.');
   refreshMyMatches();
 }
+function handleMeetupProposed(withName, meetup){
+  if(state.tab === 'matches' && state.activeChatWith === withName){
+    setState({meetups: [...state.meetups, meetup].sort((a,b)=>a.when-b.when)});
+  } else {
+    showToast(withName+' proposed a meetup — open the chat to respond.');
+  }
+  setState({allMeetups: [...state.allMeetups, {...meetup, withName}].sort((a,b)=>a.when-b.when)});
+}
+function handleMeetupAccepted(withName, meetup){
+  showToast(withName+' confirmed your meetup!');
+  if(state.tab === 'matches' && state.activeChatWith === withName){
+    setState({meetups: state.meetups.map(m => m.id === meetup.id ? meetup : m)});
+  }
+  setState({allMeetups: state.allMeetups.map(m => m.id === meetup.id ? {...meetup, withName} : m)});
+  scheduleMeetupReminders();
+}
+function handleMeetupDeclined(withName, meetup){
+  if(state.tab === 'matches' && state.activeChatWith === withName){
+    setState({meetups: state.meetups.map(m => m.id === meetup.id ? meetup : m)});
+  }
+  setState({allMeetups: state.allMeetups.filter(m => m.id !== meetup.id)});
+  cancelReminder(meetup.id);
+}
+
+// ---------- meetup reminders (in-app banner + browser notification) ----------
+async function loadAllMeetups(){
+  const data = await api('/meetups');
+  if(data.error) return;
+  setState({allMeetups: data.meetups || []});
+  scheduleMeetupReminders();
+}
+
+function formatMeetupWhen(ts){
+  return new Date(ts).toLocaleString([], {weekday:'short', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+
+// The single soonest upcoming *accepted* meetup, for the banner. Declined
+// or still-pending proposals aren't a real commitment yet, so they don't
+// belong in a reminder banner.
+function nextUpcomingMeetup(){
+  const now = Date.now();
+  return state.allMeetups
+    .filter(m => m.status === 'accepted' && m.when > now)
+    .sort((a,b) => a.when - b.when)[0] || null;
+}
+
+function cancelReminder(meetupId){
+  const handle = scheduledReminders.get(meetupId);
+  if(handle){ clearTimeout(handle); scheduledReminders.delete(meetupId); }
+}
+function cancelAllReminders(){
+  scheduledReminders.forEach(handle => clearTimeout(handle));
+  scheduledReminders.clear();
+}
+
+const REMINDER_LEAD_MS = 30 * 60 * 1000; // notify 30 minutes before
+// setTimeout delays are stored as a 32-bit int internally, so anything
+// past ~24.8 days overflows and fires immediately. Meetups further out
+// than that just get picked up on a later load (login, tab switch, etc.)
+// instead of being scheduled now.
+const MAX_TIMEOUT_MS = 20 * 24 * 60 * 60 * 1000;
+
+function scheduleMeetupReminders(){
+  if(typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  const now = Date.now();
+  state.allMeetups.forEach(m => {
+    if(m.status !== 'accepted' || m.when <= now) return;
+    if(scheduledReminders.has(m.id)) return;
+
+    const fireAt = m.when - REMINDER_LEAD_MS;
+    // If we're already inside the lead window (fireAt is in the past but
+    // the meetup itself hasn't happened), fire almost immediately instead
+    // of skipping the reminder entirely.
+    const delay = Math.max(fireAt - now, 3000);
+    if(delay > MAX_TIMEOUT_MS) return;
+
+    const handle = setTimeout(() => {
+      scheduledReminders.delete(m.id);
+      try {
+        new Notification('Quest Fit meetup coming up', {
+          body: `With ${m.withName} at ${formatMeetupWhen(m.when)}${m.location ? ' — ' + m.location : ''}`,
+        });
+      } catch(e){ /* Notification constructor can throw on some platforms (e.g. mobile) */ }
+    }, delay);
+    scheduledReminders.set(m.id, handle);
+  });
+}
+
+async function requestNotifPermission(){
+  if(typeof Notification === 'undefined') return;
+  const perm = await Notification.requestPermission();
+  setState({notifPermission: perm});
+  if(perm === 'granted') scheduleMeetupReminders();
+}
+function dismissNotifPrompt(){ setState({notifPromptDismissed:true}); }
+function dismissMeetupBanner(id){ setState({meetupBannerDismissedId:id}); }
 
 // ---------- API helper ----------
 // The auth token is stored in sessionStorage, which is scoped to a single
@@ -173,6 +286,7 @@ async function checkSession(){
   if(data.user){
     setState({screen:'app', session:data.user, tab:'discover'});
     connectLive();
+    loadAllMeetups();
   } else {
     clearToken();
     setState({screen:'login'});
@@ -205,6 +319,7 @@ async function handleSignup(){
     discoverQueue:null,
   });
   connectLive();
+  loadAllMeetups();
   showToast('Welcome to Quest Fit, '+data.user.name+'!');
 }
 
@@ -217,6 +332,7 @@ async function handleLogin(){
   setToken(data.token);
   setState({screen:'app', tab:'discover', session:data.user, authError:'', loginForm:{email:'',password:''}, discoverQueue:null});
   connectLive();
+  loadAllMeetups();
   showToast('Welcome back, '+data.user.name+'!');
 }
 
@@ -224,7 +340,8 @@ async function handleLogout(){
   await api('/logout', {method:'POST'});
   clearToken();
   disconnectLive();
-  setState({screen:'login', session:null, tab:'discover', discoverQueue:null, myMatches:{incoming:[], sent:[], accepted:[]}, activeChatWith:null, myPosts:[], myPostsLoading:true});
+  cancelAllReminders();
+  setState({screen:'login', session:null, tab:'discover', discoverQueue:null, myMatches:{incoming:[], sent:[], accepted:[]}, activeChatWith:null, myPosts:[], myPostsLoading:true, meetups:[], allMeetups:[], meetupBannerDismissedId:null, notifPromptDismissed:false});
 }
 
 // ---------- profile customization ----------
@@ -480,7 +597,7 @@ async function declineMatchRequest(matchId){
 }
 
 async function openChat(otherName){
-  setState({activeChatWith: otherName, chatLoading:true});
+  setState({activeChatWith: otherName, chatLoading:true, meetups:[], meetupsLoading:true});
   let data = await api('/chat/'+encodeURIComponent(otherName));
   if(data.error){
     // The database connection can be slow to wake up right after the
@@ -493,6 +610,62 @@ async function openChat(otherName){
     showToast("Couldn't load messages: "+data.error);
   }
   setState({chatMessages: data.messages || [], chatLoading:false});
+  loadMeetups(otherName);
+}
+
+// ---------- meetups (schedule a game with a match) ----------
+async function loadMeetups(otherName){
+  const data = await api('/meetups/'+encodeURIComponent(otherName));
+  // Guard against a race if the person switched chats before this resolved.
+  if(state.activeChatWith !== otherName) return;
+  if(data.error){ return setState({meetups:[], meetupsLoading:false}); }
+  setState({meetups: data.meetups || [], meetupsLoading:false});
+}
+
+function openMeetupModal(){
+  const now = new Date(Date.now() + 60*60*1000); // default an hour from now
+  setState({
+    meetupModalOpen: true,
+    meetupError: '',
+    meetupForm: {
+      date: now.toISOString().slice(0,10),
+      time: now.toTimeString().slice(0,5),
+      location: '',
+    }
+  });
+}
+function closeMeetupModal(){
+  setState({meetupModalOpen:false, meetupForm:null, meetupError:''});
+}
+
+async function submitMeetup(){
+  const f = state.meetupForm;
+  if(!f.date || !f.time) return setState({meetupError:'Pick a date and time.'});
+  const when = new Date(f.date+'T'+f.time).getTime();
+  if(!when || isNaN(when)) return setState({meetupError:'Pick a valid date and time.'});
+  if(when < Date.now()) return setState({meetupError:'Pick a time in the future.'});
+  if(f.location.length > 200) return setState({meetupError:'Location must be 200 characters or fewer.'});
+
+  setState({meetupSaving:true, meetupError:''});
+  const data = await api('/meetups/'+encodeURIComponent(state.activeChatWith), {
+    method:'POST', body:{when, location:f.location}
+  });
+  setState({meetupSaving:false});
+  if(data.error) return setState({meetupError:data.error});
+
+  setState({
+    meetups: [...state.meetups, data.meetup].sort((a,b)=>a.when-b.when),
+    meetupModalOpen:false,
+    meetupForm:null
+  });
+  showToast('Meetup proposed — waiting for '+state.activeChatWith+' to confirm.');
+}
+
+async function respondMeetup(id, action){
+  const data = await api('/meetups/'+id+'/'+action, {method:'POST'});
+  if(data.error) return showToast(data.error);
+  setState({meetups: state.meetups.map(m => m.id === Number(id) ? data.meetup : m)});
+  if(action === 'accept') showToast('Meetup confirmed!');
 }
 
 async function sendMessage(text, inputEl){
@@ -807,6 +980,26 @@ function renderProfileViewModal(){
     </div>`;
 }
 
+function renderMeetupCard(mt){
+  const when = formatMeetupWhen(mt.when);
+  const statusLabel = {pending: mt.mine ? 'Waiting for them to confirm' : 'Awaiting your response', accepted:'Confirmed ✅', declined:'Declined'}[mt.status] || mt.status;
+  return `
+  <div class="meetup-card">
+    <div class="meetup-when" style="font-weight:600;">📅 ${esc(when)}</div>
+    ${mt.location ? `<div style="color:var(--ink-dim);margin-top:2px;">📍 ${esc(mt.location)}</div>` : ''}
+    <div style="margin-top:4px;color:var(--ink-dim);">${statusLabel}</div>
+    ${mt.status==='pending' && !mt.mine ? `
+    <div style="margin-top:8px;display:flex;gap:6px;">
+      <button class="btn btn-lime btn-sm" data-meetup-accept="${mt.id}">Accept</button>
+      <button class="btn btn-ghost btn-sm" data-meetup-decline="${mt.id}">Decline</button>
+    </div>` : ''}
+    ${mt.status==='pending' && mt.mine ? `
+    <div style="margin-top:8px;">
+      <button class="btn btn-ghost btn-sm" data-meetup-decline="${mt.id}">Cancel</button>
+    </div>` : ''}
+  </div>`;
+}
+
 function renderMatches(){
   const { incoming, sent, accepted } = state.myMatches;
   const nothingAtAll = incoming.length === 0 && sent.length === 0 && accepted.length === 0;
@@ -865,7 +1058,7 @@ function renderMatches(){
     </div>
     <div class="chat-panel">
       ${!state.activeChatWith ? `<div class="empty-state" style="margin:auto;border:none;background:none;">Pick a match to start chatting.</div>` : `
-      <div class="chat-header">
+      <div class="chat-header" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
         <div class="chat-header-row">
           ${avatarHTML(chatOther, 32)}
           <div>
@@ -873,7 +1066,12 @@ function renderMatches(){
             <div class="ch-sub">Private conversation</div>
           </div>
         </div>
+        <button class="btn btn-ghost btn-sm" id="meetup-open-btn">📅 Schedule</button>
       </div>
+      ${!state.meetupsLoading && state.meetups.length ? `
+      <div class="meetups-list">
+        ${state.meetups.map(renderMeetupCard).join('')}
+      </div>` : ''}
       <div class="chat-body" id="chat-body">
         ${state.chatLoading ? `<div style="color:var(--ink-dim);font-size:13px;">Loading messages…</div>` :
           state.chatMessages.length===0 ? `<div style="color:var(--ink-dim);font-size:13px;">Say hi 👋 — you matched over a shared sport.</div>` :
@@ -940,6 +1138,12 @@ async function render(){
   else if(state.tab === 'matches') tabContent = renderMatches();
   else if(state.tab === 'profile') tabContent = renderProfile(self);
 
+  const upcoming = nextUpcomingMeetup();
+  const showMeetupBanner = upcoming && state.meetupBannerDismissedId !== upcoming.id;
+  const showNotifPrompt = !showMeetupBanner && typeof Notification !== 'undefined'
+    && state.notifPermission === 'default' && !state.notifPromptDismissed
+    && state.allMeetups.some(m => m.status === 'accepted');
+
   app.innerHTML = `
     <div class="topbar">
       <div class="brand">
@@ -958,6 +1162,22 @@ async function render(){
         <button class="btn btn-ghost btn-sm" id="logout-btn">Log out</button>
       </div>
     </div>
+    ${showMeetupBanner ? `
+    <div class="meetup-banner">
+      <span>📅 Meetup with <b>${esc(upcoming.withName)}</b> — ${esc(formatMeetupWhen(upcoming.when))}${upcoming.location ? ' · ' + esc(upcoming.location) : ''}</span>
+      <div class="meetup-banner-actions">
+        <button class="btn btn-lime btn-sm" id="meetup-banner-open">Open chat</button>
+        <button class="btn btn-ghost btn-sm" id="meetup-banner-dismiss">Dismiss</button>
+      </div>
+    </div>` : ''}
+    ${showNotifPrompt ? `
+    <div class="meetup-banner notif-banner">
+      <span>🔔 Get a reminder 30 minutes before your meetups?</span>
+      <div class="meetup-banner-actions">
+        <button class="btn btn-lime btn-sm" id="notif-enable-btn">Enable</button>
+        <button class="btn btn-ghost btn-sm" id="notif-dismiss-btn">Not now</button>
+      </div>
+    </div>` : ''}
     <div class="tabs">
       <div class="tab ${state.tab==='discover'?'active':''}" data-tab="discover">Discover</div>
       <div class="tab ${state.tab==='search'?'active':''}" data-tab="search">Search</div>
@@ -1030,6 +1250,42 @@ async function render(){
       state.addPostForm.caption = captionInput.value;
       document.getElementById('post-caption-counter').textContent = `${captionInput.value.length}/${MAX_POST_CAPTION_LENGTH}`;
     };
+  }
+
+  if(state.meetupModalOpen && state.meetupForm){
+    const f = state.meetupForm;
+    document.body.insertAdjacentHTML('beforeend', `
+      <div class="modal-backdrop" id="meetup-backdrop">
+        <div class="modal-card profile-modal">
+          <div class="display" style="font-size:22px;margin-bottom:14px;">Schedule a meetup</div>
+          ${state.meetupError ? `<div class="error-box">${esc(state.meetupError)}</div>` : ''}
+
+          <div class="field-row">
+            <div class="field">
+              <label>Date</label>
+              <input id="meetup-date" type="date" value="${esc(f.date)}" />
+            </div>
+            <div class="field">
+              <label>Time</label>
+              <input id="meetup-time" type="time" value="${esc(f.time)}" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Location (optional)</label>
+            <input id="meetup-location" type="text" maxlength="200" value="${esc(f.location)}" placeholder="e.g. Riverside courts" />
+          </div>
+
+          <button class="btn btn-lime btn-block" id="meetup-save-btn" ${state.meetupSaving?'disabled':''}>${state.meetupSaving ? 'Proposing…' : 'Propose meetup'}</button>
+          <button class="btn btn-ghost btn-block" id="meetup-cancel-btn" style="margin-top:10px;">Cancel</button>
+        </div>
+      </div>`);
+
+    document.getElementById('meetup-cancel-btn').onclick = closeMeetupModal;
+    document.getElementById('meetup-save-btn').onclick = submitMeetup;
+    document.getElementById('meetup-date').oninput = (e) => { state.meetupForm.date = e.target.value; };
+    document.getElementById('meetup-time').oninput = (e) => { state.meetupForm.time = e.target.value; };
+    document.getElementById('meetup-location').oninput = (e) => { state.meetupForm.location = e.target.value; };
   }
 
   if(state.toast){
@@ -1184,6 +1440,25 @@ function wireAppEvents(){
   const byId = id => document.getElementById(id);
   byId('logout-btn').onclick = handleLogout;
   byId('edit-profile-btn').onclick = openProfileModal;
+
+  const bannerOpenBtn = byId('meetup-banner-open');
+  if(bannerOpenBtn) bannerOpenBtn.onclick = async ()=>{
+    const upcoming = nextUpcomingMeetup();
+    if(!upcoming) return;
+    setState({tab:'matches'});
+    await loadMyMatches();
+    await openChat(upcoming.withName);
+  };
+  const bannerDismissBtn = byId('meetup-banner-dismiss');
+  if(bannerDismissBtn) bannerDismissBtn.onclick = ()=>{
+    const upcoming = nextUpcomingMeetup();
+    if(upcoming) dismissMeetupBanner(upcoming.id);
+  };
+  const notifEnableBtn = byId('notif-enable-btn');
+  if(notifEnableBtn) notifEnableBtn.onclick = requestNotifPermission;
+  const notifDismissBtn = byId('notif-dismiss-btn');
+  if(notifDismissBtn) notifDismissBtn.onclick = dismissNotifPrompt;
+
   document.querySelectorAll('.tab').forEach(t=>{
     t.onclick = ()=>{
       const tab = t.getAttribute('data-tab');
@@ -1255,6 +1530,14 @@ function wireAppEvents(){
         if(e.key==='Enter') doSend();
       });
     }
+    const meetupOpenBtn = byId('meetup-open-btn');
+    if(meetupOpenBtn) meetupOpenBtn.onclick = openMeetupModal;
+    document.querySelectorAll('[data-meetup-accept]').forEach(btn=>{
+      btn.onclick = ()=> respondMeetup(btn.getAttribute('data-meetup-accept'), 'accept');
+    });
+    document.querySelectorAll('[data-meetup-decline]').forEach(btn=>{
+      btn.onclick = ()=> respondMeetup(btn.getAttribute('data-meetup-decline'), 'decline');
+    });
   }
 }
 

@@ -494,6 +494,103 @@ app.post('/api/chat/:name', requireAuth, ah(async (req, res) => {
   res.json({ ok: true, message: { from: 'me', text: text.trim(), ts } });
 }));
 
+// ---------- meetups (schedule a game with a match) ----------
+function publicMeetup(row, viewerId) {
+  return {
+    id: row.id,
+    matchId: row.match_id,
+    mine: row.proposed_by === viewerId,
+    when: Number(row.meetup_at),
+    location: row.location || '',
+    status: row.status,
+    createdAt: Number(row.created_at),
+  };
+}
+
+app.get('/api/meetups', requireAuth, ah(async (req, res) => {
+  const rows = await many(
+    `SELECT m.*, u.name AS other_name
+     FROM meetups m
+     JOIN matches mt ON mt.id = m.match_id
+     JOIN users u ON u.id = (CASE WHEN mt.user_a = $1 THEN mt.user_b ELSE mt.user_a END)
+     WHERE (mt.user_a = $1 OR mt.user_b = $1) AND m.status IN ('pending','accepted')
+     ORDER BY m.meetup_at ASC`,
+    [req.userId]
+  );
+  res.json({ meetups: rows.map(r => ({ ...publicMeetup(r, req.userId), withName: r.other_name })) });
+}));
+
+app.get('/api/meetups/:name', requireAuth, ah(async (req, res) => {
+  const other = await one('SELECT * FROM users WHERE LOWER(name) = LOWER($1)', [req.params.name]);
+  if (!other) return res.status(404).json({ error: 'Profile not found.' });
+  const m = await findMatch(req.userId, other.id);
+  if (!m || m.status !== 'accepted') return res.status(403).json({ error: 'You are not matched with this person yet.' });
+
+  const rows = await many('SELECT * FROM meetups WHERE match_id = $1 ORDER BY meetup_at ASC', [m.id]);
+  res.json({ meetups: rows.map(r => publicMeetup(r, req.userId)) });
+}));
+
+app.post('/api/meetups/:name', requireAuth, ah(async (req, res) => {
+  const { when, location } = req.body || {};
+  const other = await one('SELECT * FROM users WHERE LOWER(name) = LOWER($1)', [req.params.name]);
+  if (!other) return res.status(404).json({ error: 'Profile not found.' });
+  const m = await findMatch(req.userId, other.id);
+  if (!m || m.status !== 'accepted') return res.status(403).json({ error: 'You are not matched with this person yet.' });
+
+  const whenNum = Number(when);
+  if (!whenNum || !Number.isFinite(whenNum)) return res.status(400).json({ error: 'Pick a valid date and time.' });
+  if (whenNum < Date.now()) return res.status(400).json({ error: 'Pick a time in the future.' });
+  if (location !== undefined && (typeof location !== 'string' || location.length > 200)) {
+    return res.status(400).json({ error: 'Location must be 200 characters or fewer.' });
+  }
+
+  const row = await one(
+    'INSERT INTO meetups (match_id, proposed_by, meetup_at, location, status, created_at) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+    [m.id, req.userId, whenNum, (location || '').trim(), 'pending', Date.now()]
+  );
+
+  const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
+  pushToUser(other.id, { type: 'meetup_proposed', withName: me.name, meetup: publicMeetup(row, other.id) });
+
+  res.json({ meetup: publicMeetup(row, req.userId) });
+}));
+
+app.post('/api/meetups/:id/accept', requireAuth, ah(async (req, res) => {
+  const meetup = await one('SELECT * FROM meetups WHERE id = $1', [req.params.id]);
+  if (!meetup) return res.status(404).json({ error: 'Meetup not found.' });
+  const m = await one('SELECT * FROM matches WHERE id = $1', [meetup.match_id]);
+  if (!m || (m.user_a !== req.userId && m.user_b !== req.userId)) {
+    return res.status(404).json({ error: 'Meetup not found.' });
+  }
+  if (meetup.proposed_by === req.userId) return res.status(403).json({ error: "You can't accept your own proposal." });
+  if (meetup.status !== 'pending') return res.status(400).json({ error: 'This proposal has already been responded to.' });
+
+  const row = await one('UPDATE meetups SET status = $1 WHERE id = $2 RETURNING *', ['accepted', meetup.id]);
+  const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
+  pushToUser(meetup.proposed_by, { type: 'meetup_accepted', withName: me.name, meetup: publicMeetup(row, meetup.proposed_by) });
+
+  res.json({ meetup: publicMeetup(row, req.userId) });
+}));
+
+app.post('/api/meetups/:id/decline', requireAuth, ah(async (req, res) => {
+  const meetup = await one('SELECT * FROM meetups WHERE id = $1', [req.params.id]);
+  if (!meetup) return res.status(404).json({ error: 'Meetup not found.' });
+  const m = await one('SELECT * FROM matches WHERE id = $1', [meetup.match_id]);
+  if (!m || (m.user_a !== req.userId && m.user_b !== req.userId)) {
+    return res.status(404).json({ error: 'Meetup not found.' });
+  }
+  // Either side can decline a pending proposal - the recipient turning it
+  // down, or the proposer cancelling it themselves.
+  if (meetup.status !== 'pending') return res.status(400).json({ error: 'This proposal has already been responded to.' });
+
+  const row = await one('UPDATE meetups SET status = $1 WHERE id = $2 RETURNING *', ['declined', meetup.id]);
+  const otherId = m.user_a === req.userId ? m.user_b : m.user_a;
+  const me = await one('SELECT name FROM users WHERE id = $1', [req.userId]);
+  pushToUser(otherId, { type: 'meetup_declined', withName: me.name, meetup: publicMeetup(row, otherId) });
+
+  res.json({ meetup: publicMeetup(row, req.userId) });
+}));
+
 const server = http.createServer(app);
 
 const wss = new WebSocketServer({ server, path: '/ws' });

@@ -103,6 +103,20 @@ async function initSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id);
   `);
+
+  // --- migration: meetups (schedule a game with a match) ---
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meetups (
+      id SERIAL PRIMARY KEY,
+      match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+      proposed_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      meetup_at BIGINT NOT NULL,
+      location TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','declined')),
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_meetups_match_id ON meetups(match_id);
+  `);
 }
 
 module.exports = { pool, initSchema };

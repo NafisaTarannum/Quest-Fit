@@ -56,6 +56,7 @@ let state = {
   activeChatWith: null,
   chatMessages: [],
   chatLoading: false,
+
   meetups: [],
   meetupsLoading: false,
   meetupModalOpen: false,
@@ -63,6 +64,7 @@ let state = {
   meetupSaving: false,
   meetupError: '',
   toast: null,
+
   profileModalOpen: false,
   profileForm: null,       // {bio, avatarEmoji, avatarColor, title, photoDataUrl}
   profileSaving: false,
@@ -83,7 +85,33 @@ let state = {
 };
 
 function setState(patch){ state = {...state, ...patch}; render(); }
-function showToast(msg){ setState({toast: msg}); setTimeout(()=>{ if(state.toast===msg) setState({toast:null}); }, 2600); }
+
+// Toasts fire very frequently - on essentially every live event from
+// another user (a message, a match request, a match acceptance) - so
+// routing them through setState()/render() would force a full rebuild of
+// the entire current page (including any images on screen, e.g. a posts
+// grid) twice per toast: once to show it, once to hide it. That's wasteful
+// and can visibly bog down the browser, especially with multiple tabs
+// open. Toasts render directly instead, completely independent of the
+// main state/render cycle.
+function getToastContainer(){
+  let el = document.getElementById('toast-container');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'toast-container';
+    el.className = 'toast-container';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function showToast(msg){
+  const container = getToastContainer();
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
 
 // ---------- live chat (WebSocket) ----------
 let liveSocket = null;
@@ -574,13 +602,17 @@ async function loadMyMatches(){
 async function refreshMyMatches(){
   const data = await api('/matches');
   if(data.error) return;
-  setState({
-    myMatches: {
-      incoming: data.incoming || [],
-      sent: data.sent || [],
-      accepted: data.accepted || [],
-    }
-  });
+  const next = {
+    incoming: data.incoming || [],
+    sent: data.sent || [],
+    accepted: data.accepted || [],
+  };
+  // This gets called after almost every live event and swipe action, but
+  // the data frequently hasn't actually changed. Skipping a no-op render
+  // avoids needlessly rebuilding the whole page (including any images
+  // currently on screen) when nothing is actually different.
+  if(JSON.stringify(next) === JSON.stringify(state.myMatches)) return;
+  setState({myMatches: next});
 }
 
 async function acceptMatchRequest(matchId, otherName){
@@ -1104,12 +1136,13 @@ function renderMatches(){
 async function render(){
   const app = document.getElementById('app');
 
-  // Modals and toasts get appended directly to document.body (outside
-  // #app) further down, so rebuilding #app's innerHTML never touches
-  // them. Without this cleanup, closing a modal (or any background
-  // re-render while one is open) leaves the old overlay stuck on screen
-  // permanently, blocking the whole page.
-  document.querySelectorAll('.modal-backdrop, .toast').forEach(el => el.remove());
+  // Modals get appended directly to document.body (outside #app) further
+  // down, so rebuilding #app's innerHTML never touches them. Without this
+  // cleanup, closing a modal (or any background re-render while one is
+  // open) leaves the old overlay stuck on screen permanently, blocking the
+  // whole page. Toasts are handled separately (see showToast) and manage
+  // their own removal on a timer, so they're deliberately excluded here.
+  document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
 
   // The whole screen gets rebuilt from scratch on every state change,
   // including on unrelated background events (a live chat push, a toast,
@@ -1252,6 +1285,7 @@ async function render(){
     };
   }
 
+
   if(state.meetupModalOpen && state.meetupForm){
     const f = state.meetupForm;
     document.body.insertAdjacentHTML('beforeend', `
@@ -1291,6 +1325,7 @@ async function render(){
   if(state.toast){
     document.body.insertAdjacentHTML('beforeend', `<div class="toast">${esc(state.toast)}</div>`);
   }
+
 
   if(state.profileModalOpen && state.profileForm){
     const f = state.profileForm;

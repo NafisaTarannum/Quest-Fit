@@ -150,7 +150,7 @@ app.post('/api/signup', ah(async (req, res) => {
   const existingEmail = await one('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
   if (existingEmail) return res.status(409).json({ error: 'An account with that email already exists.' });
 
-  const hash = bcrypt.hashSync(password, 10);
+  const hash = await bcrypt.hash(password, 10);
   const createdAt = Date.now();
 
   const client = await pool.connect();
@@ -188,7 +188,7 @@ app.post('/api/login', ah(async (req, res) => {
   if (!validEmail(email) || !password) return res.status(400).json({ error: 'Enter your email and password.' });
 
   const row = await one('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email.trim()]);
-  if (!row || !bcrypt.compareSync(password, row.password_hash)) {
+  if (!row || !(await bcrypt.compare(password, row.password_hash))) {
     return res.status(401).json({ error: 'Incorrect email or password.' });
   }
   const token = createToken(row.id);
@@ -617,3 +617,77 @@ initSchema()
     console.error('Failed to set up the database:', err.message);
     process.exit(1);
   });
+
+// Render (and most hosts) send SIGTERM to the OLD process during every
+// redeploy, right before starting the new one. Without handling it, the
+// process just dies mid-connection, leaving its database connections
+// dangling on Neon's side until Neon's own idle timeout eventually notices
+// and reaps them - which can take a while. Over many redeploys, those
+// stale connections add up and can contribute to real slowdowns for
+// other requests queuing behind them. This ensures every deploy releases
+// its connections immediately and cleanly instead.
+function shutdown(signal) {
+  console.log(`Received ${signal}, shutting down gracefully...`);
+  for (const sockets of socketsByUser.values()) {
+    for (const ws of sockets) {
+      try { ws.close(1001, 'Server restarting'); } catch (e) {}
+    }
+  }
+  server.close(() => {
+    pool.end()
+      .then(() => {
+        console.log('Database connections closed cleanly.');
+        process.exit(0);
+      })
+      .catch(err => {
+        console.error('Error closing database pool:', err.message);
+        process.exit(1);
+      });
+  });
+  // Safety net: force-exit if graceful shutdown hangs for some reason,
+  // rather than leaving Render waiting indefinitely on a stuck process.
+  setTimeout(() => process.exit(1), 8000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Render (and most hosts) sends SIGTERM to the OLD process a moment before
+// starting the new one on every redeploy. Without handling it, the old
+// process's database connections aren't explicitly closed - they can sit
+// on Neon's side as orphaned/stale connections until Neon's own timeout
+// eventually notices and reaps them. After many redeploys, those add up
+// and can contribute to connections queuing up for real users. Closing
+// everything here releases them immediately instead.
+let shuttingDown = false;
+function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, shutting down gracefully...`);
+
+  for (const sockets of socketsByUser.values()) {
+    for (const ws of sockets) {
+      try { ws.close(1001, 'Server restarting'); } catch (e) {}
+    }
+  }
+
+  server.close(() => {
+    pool.end()
+      .then(() => {
+        console.log('Database pool closed cleanly.');
+        process.exit(0);
+      })
+      .catch(err => {
+        console.error('Error closing database pool:', err.message);
+        process.exit(1);
+      });
+  });
+
+  // Safety net: if something hangs during shutdown, don't let the old
+  // process linger forever and delay the new deploy.
+  setTimeout(() => {
+    console.error('Graceful shutdown timed out, forcing exit.');
+    process.exit(1);
+  }, 8000).unref();
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

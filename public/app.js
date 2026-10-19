@@ -894,7 +894,240 @@ function renderDiscover(self){
     ${body}
   </div>`;
 }
+// ---------- map ----------
+function renderMap(){
+  return `
+    <div class="map-page">
+      <h2>🗺️ Explore Sports Nearby</h2>
+      <p>Discover sports activities and places around you.</p>
+<div class="map-filters">
+  <label for="sport-filter">Filter by sport:</label>
 
+  <select id="sport-filter">
+    <option value="all">🏅 All Sports</option>
+    <option value="basketball">🏀 Basketball</option>
+    <option value="soccer">⚽ Football</option>
+    <option value="tennis">🎾 Tennis</option>
+  </select>
+</div>
+      <div id="quest-map"></div>
+      </div>
+    </div>
+  `;
+}
+// ---------- initialise map ----------
+let questMap = null;
+let sportsMarkers = null;
+let selectedSport = 'all';
+let cachedSportsLocations = [];
+
+let currentMapLat = -33.8688;
+let currentMapLng = 151.2093;
+
+let sportsRequestId = 0;
+function initMap() {
+  const mapContainer = document.getElementById('quest-map');
+
+  if (!mapContainer || typeof L === 'undefined') return;
+
+  // Clean up the previous map instance
+  if (questMap) {
+    questMap.remove();
+    questMap = null;
+  }
+
+  // Sydney coordinates
+  questMap = L.map('quest-map').setView([-33.8688, 151.2093], 12);
+  // Create a layer to manage sports facility markers
+sportsMarkers = L.layerGroup().addTo(questMap);
+const sportFilter = document.getElementById('sport-filter');
+
+if (sportFilter) {
+    sportFilter.value = selectedSport;
+
+    sportFilter.addEventListener('change', function () {
+    selectedSport = this.value;
+    displaySportsMarkers();
+});
+}
+// Current Location button
+const locationControl = L.control({ position: 'topright' });
+
+locationControl.onAdd = function () {
+  const button = L.DomUtil.create('button');
+
+  button.innerHTML = '📍';
+  button.title = 'Find my location';
+
+  button.style.background = 'white';
+  button.style.border = '2px solid #ccc';
+  button.style.borderRadius = '5px';
+  button.style.padding = '10px';
+  button.style.cursor = 'pointer';
+  button.style.fontSize = '20px';
+
+  L.DomEvent.disableClickPropagation(button);
+
+  L.DomEvent.on(button, 'click', function (e) {
+    L.DomEvent.stop(e);
+
+    if (!navigator.geolocation) {
+      alert('Geolocation is not supported by your browser.');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      function (position) {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        // Remember the user's location for sports filtering
+currentMapLat = lat;
+currentMapLng = lng;
+
+        questMap.setView([lat, lng], 15);
+
+        L.marker([lat, lng])
+          .addTo(questMap)
+          .bindPopup('📍 You are here!')
+          .openPopup();
+          // Load sports facilities near the user's current location
+loadSportsLocations(lat, lng);
+      },
+      function (error) {
+        alert('Unable to get your location: ' + error.message);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000
+      }
+    );
+  });
+
+  return button;
+};
+
+locationControl.addTo(questMap);
+  // OpenStreetMap tiles
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(questMap);
+
+  // Sydney marker
+  L.marker([-33.8688, 151.2093])
+    .addTo(questMap)
+    .bindPopup('Welcome to Sydney! 🏙️');
+
+
+  // Fix map sizing after rendering
+  setTimeout(() => {
+    if (questMap) questMap.invalidateSize();
+  }, 100);
+  // Load real sports facilities from OpenStreetMap
+loadSportsLocations();
+}
+// ---------- Display sports markers ----------
+function displaySportsMarkers() {
+    if (!questMap || !sportsMarkers) return;
+
+    // Clear existing sports markers
+    sportsMarkers.clearLayers();
+
+    cachedSportsLocations.forEach(place => {
+        const lat = place.lat ?? place.center?.lat;
+        const lng = place.lon ?? place.center?.lon;
+
+        if (lat == null || lng == null) return;
+
+        const name = place.tags?.name || 'Sports Facility';
+        const sport = place.tags?.sport || 'Sport';
+
+        // Filter by selected sport
+        if (selectedSport !== 'all') {
+            const sports = sport.toLowerCase()
+                .split(';')
+                .map(s => s.trim());
+
+            if (!sports.includes(selectedSport)) return;
+        }
+
+        // Create popup
+        const popup = document.createElement('div');
+
+        const title = document.createElement('strong');
+        title.textContent = name;
+
+        const description = document.createElement('p');
+        description.textContent = `Sport: ${sport}`;
+
+        popup.append(title, description);
+
+        // Add marker
+        L.marker([lat, lng])
+            .addTo(sportsMarkers)
+            .bindPopup(popup);
+    });
+}
+// ---------- Fetch real sports locations ----------
+async function loadSportsLocations(lat = -33.8688, lng = 151.2093) {
+  if (!questMap) return;
+  // Give each sports request a unique number
+const requestId = ++sportsRequestId;
+  // Remove previous sports markers before loading new ones
+if (sportsMarkers) {
+    sportsMarkers.clearLayers();
+}
+
+  const map = questMap;
+
+  // Search for sports facilities within 3 km of Sydney CBD
+  const query = `
+  [out:json][timeout:25];
+  (
+    nwr["leisure"="pitch"]["sport"~"basketball|soccer|tennis"](around:3000,${lat},${lng});
+  );
+  out center;
+`;
+
+  try {
+    const response = await fetch(
+  `/api/sports-locations?lat=${lat}&lng=${lng}`
+);
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch sports locations');
+    }
+
+    const data = await response.json();
+    // Store downloaded sports facilities
+cachedSportsLocations = data.elements || [];
+
+// Display markers using the selected sport
+displaySportsMarkers();
+    // Ignore outdated requests
+if (requestId !== sportsRequestId) {
+    return;
+}
+
+    // Don't add markers to an old map after switching tabs
+    if (questMap !== map) return;
+    // Store downloaded sports facilities
+cachedSportsLocations = data.elements || [];
+
+// Display markers using the selected sport
+displaySportsMarkers();
+
+console.log(`Loaded ${cachedSportsLocations.length} sports locations`);
+
+
+
+    console.log(`Loaded ${data.elements.length} sports locations`);
+
+  } catch (error) {
+    if (requestId !== sportsRequestId) return;
+    console.error('Error loading sports locations:', error);
+  }
+}
 function renderSearch(){
   const f = state.searchFilters;
   const results = state.searchResults;
@@ -1168,6 +1401,7 @@ async function render(){
   let tabContent = '';
   if(state.tab === 'discover') tabContent = renderDiscover(self);
   else if(state.tab === 'search') tabContent = renderSearch();
+  else if(state.tab === 'map') tabContent = renderMap();
   else if(state.tab === 'matches') tabContent = renderMatches();
   else if(state.tab === 'profile') tabContent = renderProfile(self);
 
@@ -1214,13 +1448,17 @@ async function render(){
     <div class="tabs">
       <div class="tab ${state.tab==='discover'?'active':''}" data-tab="discover">Discover</div>
       <div class="tab ${state.tab==='search'?'active':''}" data-tab="search">Search</div>
+      <div class="tab ${state.tab==='map'?'active':''}" data-tab="map">🗺️ Map</div>
       <div class="tab ${state.tab==='matches'?'active':''}" data-tab="matches">Matches<span class="count">${state.myMatches.incoming.length||''}</span></div>
       <div class="tab ${state.tab==='profile'?'active':''}" data-tab="profile">Profile</div>
     </div>
     ${tabContent}
     <div class="footer-note">Quest Fit · running on your own server, data stored in a cloud Postgres database.</div>
   `;
-
+// Initialise Leaflet when the Map tab is active
+if (state.tab === 'map') {
+  initMap();
+}
   if(state.matchModal){
     const other = state.matchModal;
     document.body.insertAdjacentHTML('beforeend', `

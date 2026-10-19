@@ -125,7 +125,76 @@ async function findMatch(idA, idB) {
   const [a, b] = matchKey(idA, idB);
   return one('SELECT * FROM matches WHERE user_a = $1 AND user_b = $2', [a, b]);
 }
+// ---------- sports map API ----------
+// Cache sports facilities for 30 minutes
+const sportsCache = new Map();
+const SPORTS_CACHE_DURATION = 30 * 60 * 1000;
+app.get('/api/sports-locations', async (req, res) => {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
 
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) ||
+        lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return res.status(400).json({
+            error: 'Invalid coordinates'
+        });
+    }
+// Check if sports facilities are already cached
+const cacheKey = `${lat.toFixed(3)},${lng.toFixed(3)}`;
+const cached = sportsCache.get(cacheKey);
+
+if (cached && Date.now() - cached.timestamp < SPORTS_CACHE_DURATION) {
+    console.log('Returning cached sports facilities');
+    return res.json(cached.data);
+}
+    const query = `
+        [out:json][timeout:25];
+        (
+            nwr["leisure"="pitch"]["sport"~"basketball|soccer|tennis"]
+            (around:3000,${lat},${lng});
+        );
+        out center;
+    `;
+
+    try {
+        const response = await fetch(
+            'https://overpass-api.de/api/interpreter',
+            {
+                method: 'POST',
+                body: new URLSearchParams({ data: query }),
+                signal: AbortSignal.timeout(30000)
+            }
+        );
+
+        if (!response.ok) {
+            throw new Error(`Overpass API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+// Save successful API results for 30 minutes
+sportsCache.set(cacheKey, {
+    data: data,
+    timestamp: Date.now()
+});
+
+console.log(`Cached ${data.elements?.length || 0} sports facilities`);
+
+res.json(data);
+
+    } catch (error) {
+        console.error('Sports API error:', error.message);
+        // Return previously cached data if Overpass is unavailable
+if (cached) {
+    console.log('Overpass unavailable. Returning cached sports facilities.');
+    return res.json(cached.data);
+}
+
+        res.status(502).json({
+            error: 'Unable to load sports facilities'
+        });
+    }
+});
 // ---------- auth ----------
 app.post('/api/signup', ah(async (req, res) => {
   const { name, email, password, age, gender, sports } = req.body || {};

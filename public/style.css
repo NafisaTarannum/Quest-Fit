@@ -383,3 +383,36 @@
     .profile-name-row{flex-direction:column;gap:8px;}
     .profile-stats-row{justify-content:center;}
   }
+/* ---------- Quest-Fit Map ---------- */
+
+.map-page {
+  width: 100%;
+  padding: 20px 0;
+}
+
+.map-page h2 {
+  margin-bottom: 12px;
+}
+
+.map-page p {
+  margin-bottom: 20px;
+  color: #a0aec0;
+}
+
+#quest-map {
+  width: 100%;
+  height: 500px;
+  border-radius: 16px;
+  overflow: hidden;
+  z-index: 0;
+}
+
+@media (max-width: 768px) {
+  #quest-map {
+    height: 400px;
+  }
+
+  .map-page {
+    padding: 10px 0;
+  }
+}

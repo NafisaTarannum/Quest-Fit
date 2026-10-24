@@ -912,6 +912,10 @@ function renderMap(){
         </select>
       </div>
       <div id="map-status" class="map-status loading" role="status" aria-live="polite">Finding nearby sports facilities…</div>
+      <div class="map-legend" aria-label="Map pin legend">
+        <span><i class="map-legend-pin user"></i>You are here</span>
+        <span><i class="map-legend-pin facility"></i>Facility matching the selected sport</span>
+      </div>
       <div id="quest-map"></div>
     </div>
   `;
@@ -928,6 +932,19 @@ let currentMapLng = 151.2093;
 let sportsRequestId = 0;
 let sportsFetchController = null;
 let sportsLoading = false;
+let facilityPinIcon = null;
+let userPinIcon = null;
+let userLocationMarker = null;
+
+function createMapPinIcon(type, label) {
+  return L.divIcon({
+    className: 'map-pin-icon',
+    html: `<span class="sport-map-pin ${type}" role="img" aria-label="${label}"></span>`,
+    iconSize: [30, 42],
+    iconAnchor: [15, 42],
+    popupAnchor: [0, -38],
+  });
+}
 
 function setMapStatus(type, message, { retry = false } = {}) {
   const status = document.getElementById('map-status');
@@ -965,10 +982,13 @@ function initMap() {
   if (questMap) {
     questMap.remove();
     questMap = null;
+    userLocationMarker = null;
   }
 
   // Sydney is the initial view; the location control can update this later.
   questMap = L.map('quest-map').setView([currentMapLat, currentMapLng], 12);
+  facilityPinIcon = createMapPinIcon('facility', 'Sports facility');
+  userPinIcon = createMapPinIcon('user', 'Your location');
   // Create a layer to manage sports facility markers
 sportsMarkers = L.layerGroup().addTo(questMap);
 const sportFilter = document.getElementById('sport-filter');
@@ -1016,10 +1036,14 @@ locationControl.onAdd = function () {
 
         questMap.setView([lat, lng], 15);
 
-        L.marker([lat, lng])
-          .addTo(questMap)
-          .bindPopup('📍 You are here!')
-          .openPopup();
+        if (userLocationMarker) {
+          userLocationMarker.setLatLng([lat, lng]);
+        } else {
+          userLocationMarker = L.marker([lat, lng], { icon: userPinIcon })
+            .addTo(questMap)
+            .bindPopup('You are here');
+        }
+        userLocationMarker.openPopup();
         // Load sports facilities near the user's current location.
         loadSportsLocations(lat, lng);
       },
@@ -1042,12 +1066,6 @@ locationControl.addTo(questMap);
     attribution: '&copy; OpenStreetMap contributors',
     maxZoom: 19
   }).addTo(questMap);
-
-  // Sydney marker
-  L.marker([-33.8688, 151.2093])
-    .addTo(questMap)
-    .bindPopup('Welcome to Sydney! 🏙️');
-
 
   // Fix map sizing after rendering
   setTimeout(() => {
@@ -1087,7 +1105,7 @@ function displaySportsMarkers({ updateStatus = true } = {}) {
         popup.append(title, description);
 
         // Add marker
-        L.marker([lat, lng])
+        L.marker([lat, lng], { icon: facilityPinIcon })
             .addTo(sportsMarkers)
             .bindPopup(popup);
         markerCount += 1;

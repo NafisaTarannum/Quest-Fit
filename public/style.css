@@ -425,6 +425,64 @@
 .map-status.warning { background: #493b21; color: #ffe0a3; }
 .map-status.error { background: #482631; color: #ffd2db; }
 
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 0 0 12px;
+  color: #d8e1ec;
+  font-size: 0.85rem;
+}
+
+.map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map-legend-pin {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0,0,0,.45);
+}
+
+.map-legend-pin.user { background: #e43b44; }
+.map-legend-pin.facility { background: #2878d4; }
+
+.map-pin-icon {
+  background: transparent;
+  border: 0;
+}
+
+.sport-map-pin {
+  position: absolute;
+  display: block;
+  width: 24px;
+  height: 24px;
+  border: 3px solid #fff;
+  border-radius: 50% 50% 50% 0;
+  box-shadow: 0 2px 5px rgba(0,0,0,.5);
+  transform: rotate(-45deg);
+}
+
+.sport-map-pin::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.sport-map-pin.user { background: #e43b44; }
+.sport-map-pin.facility { background: #2878d4; }
+
 .map-retry {
   border: 0;
   border-radius: 6px;
@@ -459,5 +517,11 @@
 
   .map-filters select {
     width: 100%;
+  }
+
+  .map-legend {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
   }
 }

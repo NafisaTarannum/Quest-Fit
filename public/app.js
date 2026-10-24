@@ -935,6 +935,8 @@ let sportsLoading = false;
 let facilityPinIcon = null;
 let userPinIcon = null;
 let userLocationMarker = null;
+const DIRECT_OVERPASS_ENDPOINT = 'https://overpass-api.de/api/interpreter';
+const SPORTS_SEARCH_RADIUS_METRES = 3_000;
 
 function createMapPinIcon(type, label) {
   return L.divIcon({
@@ -971,6 +973,34 @@ function resultsStatus(count) {
       : `No ${label} facilities were found within 3 km of this location.`;
   }
   return `Showing ${count} nearby ${label} facilit${count === 1 ? 'y' : 'ies'}.`;
+}
+
+function buildDirectSportsQuery(lat, lng) {
+  const safeLat = Number(lat).toFixed(6);
+  const safeLng = Number(lng).toFixed(6);
+  const sportPattern = '(^|;)(basketball|soccer|football|tennis)(;|$)';
+
+  return `
+[out:json][timeout:25];
+(
+  nwr(around:${SPORTS_SEARCH_RADIUS_METRES},${safeLat},${safeLng})["sport"~"${sportPattern}"];
+);
+out center;
+`;
+}
+
+async function fetchSportsLocationsDirectly(lat, lng, signal) {
+  const url = new URL(DIRECT_OVERPASS_ENDPOINT);
+  url.searchParams.set('data', buildDirectSportsQuery(lat, lng));
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error('OpenStreetMap could not load nearby facilities.');
+
+  return { elements: Array.isArray(data.elements) ? data.elements : [] };
 }
 
 function initMap() {
@@ -1115,7 +1145,15 @@ function displaySportsMarkers({ updateStatus = true } = {}) {
         if (identity.nameSource !== 'operator') addDetail('Operator', identity.operator);
         if (identity.nameSource !== 'club') addDetail('Club', identity.club);
         addDetail('Address', identity.address);
+        addDetail('Location', `${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)}`);
         if (identity.nameSource === 'missing') addDetail('Note', 'This facility has no name recorded in OpenStreetMap.');
+
+        const mapLink = document.createElement('a');
+        mapLink.href = `https://www.openstreetmap.org/?mlat=${encodeURIComponent(lat)}&mlon=${encodeURIComponent(lng)}#map=18/${lat}/${lng}`;
+        mapLink.target = '_blank';
+        mapLink.rel = 'noopener noreferrer';
+        mapLink.textContent = 'Open this location in OpenStreetMap';
+        popup.append(mapLink);
 
         // Add marker
         L.marker([lat, lng], { icon: facilityPinIcon })
@@ -1147,13 +1185,34 @@ async function loadSportsLocations(lat = -33.8688, lng = 151.2093) {
   const map = questMap;
 
   try {
-    const response = await fetch(`/api/sports-locations?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, {
-      signal: sportsFetchController.signal,
-    });
-    const data = await response.json().catch(() => ({}));
+    let data;
+    let apiError = null;
+    let usedDirectFallback = false;
 
-    if (!response.ok) {
-      throw new Error(data.error || 'Unable to load nearby sports facilities.');
+    try {
+      const response = await fetch(`/api/sports-locations?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, {
+        signal: sportsFetchController.signal,
+      });
+      const apiData = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(apiData.error || 'Unable to load nearby sports facilities.');
+      }
+      data = { ...apiData, elements: Array.isArray(apiData.elements) ? apiData.elements : [] };
+    } catch (error) {
+      apiError = error;
+    }
+
+    // The browser fallback is used only after the app API fails or returns
+    // no data. It keeps blue facility pins usable during a backend outage.
+    if (apiError || data.elements.length === 0) {
+      try {
+        data = await fetchSportsLocationsDirectly(lat, lng, sportsFetchController.signal);
+        usedDirectFallback = true;
+      } catch (directError) {
+        if (apiError) throw directError;
+        console.warn('Direct OpenStreetMap fallback failed:', directError);
+      }
     }
 
     // Ignore an earlier location request that completed after a newer one.
@@ -1162,7 +1221,9 @@ async function loadSportsLocations(lat = -33.8688, lng = 151.2093) {
     cachedSportsLocations = Array.isArray(data.elements) ? data.elements : [];
     sportsLoading = false;
     const markerCount = displaySportsMarkers({ updateStatus: false });
-    if (data.stale) {
+    if (usedDirectFallback) {
+      setMapStatus(markerCount ? 'success' : 'empty', `${resultsStatus(markerCount)} Loaded directly from OpenStreetMap.`);
+    } else if (data.stale) {
       setMapStatus('warning', `${data.warning || 'Live sports data is temporarily unavailable.'} ${resultsStatus(markerCount)}`);
     } else {
       setMapStatus(markerCount ? 'success' : 'empty', resultsStatus(markerCount));

@@ -4,7 +4,7 @@ const DEFAULT_OVERPASS_ENDPOINTS = [
 ];
 
 const SEARCH_RADIUS_METRES = 3_000;
-const OVERPASS_REQUEST_TIMEOUT_MS = 15_000;
+const OVERPASS_REQUEST_TIMEOUT_MS = 25_000;
 
 function validateCoordinates(lat, lng) {
   return Number.isFinite(lat) && Number.isFinite(lng) &&
@@ -22,16 +22,15 @@ function buildSportsQuery(lat, lng) {
   const safeLng = Number(lng).toFixed(6);
   const around = `(around:${SEARCH_RADIUS_METRES},${safeLat},${safeLng})`;
 
-  // Exact sport values use Overpass's tag index and are far more reliable
-  // than a broad regular-expression scan. OSM convention uses "soccer",
-  // while a few facilities use "football", so include both.
-  const searches = ['basketball', 'soccer', 'football', 'tennis']
-    .map(sport => `  nwr${around}["sport"="${sport}"];`)
-    .join('\n');
+  // Sport values are sometimes combined, e.g. "basketball;netball". Match
+  // complete semicolon-delimited values so those facilities appear without
+  // accidentally treating "american_football" as football. OSM convention
+  // uses "soccer", while a few facilities use "football", so include both.
+  const sportPattern = '(^|;)(basketball|soccer|football|tennis)(;|$)';
   return `
 [out:json][timeout:25];
 (
-${searches}
+  nwr${around}["sport"~"${sportPattern}"];
 );
 out center;
 `;
@@ -54,24 +53,24 @@ async function requestFromEndpoint(endpoint, query, fetchImpl) {
     Accept: 'application/json',
     'User-Agent': 'Quest-Fit nearby sports map/1.0',
   };
-  const postResponse = await fetchWithTimeout(fetchImpl, endpoint, {
-    method: 'POST',
-    headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-    body: new URLSearchParams({ data: query }),
-  });
+  const url = new URL(endpoint);
+  url.searchParams.set('data', query);
+  const getResponse = await fetchWithTimeout(fetchImpl, url, { headers });
 
-  if (postResponse.ok) return readOverpassResponse(postResponse, endpoint);
+  if (getResponse.ok) return readOverpassResponse(getResponse, endpoint);
 
-  // A few public instances reject form POSTs with 406. The standard
-  // interpreter also accepts the same query as a GET data= parameter.
-  if (postResponse.status === 406) {
-    const url = new URL(endpoint);
-    url.searchParams.set('data', query);
-    const getResponse = await fetchWithTimeout(fetchImpl, url, { headers });
-    return readOverpassResponse(getResponse, endpoint);
+  // Some instances require form POST instead. The main public endpoint
+  // currently rejects that format with 406, so always try the GET form first.
+  if (getResponse.status === 405 || getResponse.status === 406) {
+    const postResponse = await fetchWithTimeout(fetchImpl, endpoint, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: new URLSearchParams({ data: query }),
+    });
+    return readOverpassResponse(postResponse, endpoint);
   }
 
-  throw upstreamError(endpoint, postResponse);
+  throw upstreamError(endpoint, getResponse);
 }
 
 async function fetchWithTimeout(fetchImpl, url, options) {
@@ -109,6 +108,7 @@ function createSportsLocationsHandler({
   inFlight = new Map(),
   now = () => Date.now(),
   cacheDuration = 30 * 60 * 1000,
+  emptyCacheDuration = 60 * 1000,
   fetchFacilities = fetchSportsFacilities,
   logger = console,
 } = {}) {
@@ -121,7 +121,11 @@ function createSportsLocationsHandler({
 
     const cacheKey = cacheKeyForCoordinates(lat, lng);
     const cached = cache.get(cacheKey);
-    if (cached && now() - cached.timestamp < cacheDuration) {
+    const cachedElements = cached?.data?.elements;
+    const duration = Array.isArray(cachedElements) && cachedElements.length === 0
+      ? emptyCacheDuration
+      : cacheDuration;
+    if (cached && now() - cached.timestamp < duration) {
       return res.json({ ...cached.data, stale: false });
     }
 

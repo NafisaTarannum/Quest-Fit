@@ -32,10 +32,7 @@ test('accepts valid coordinates and builds a scoped basketball, football and ten
   assert.equal(cacheKeyForCoordinates(-33.8688, 151.2093), '-33.869,151.209');
 
   const query = buildSportsQuery(-33.8688, 151.2093);
-  assert.match(query, /\["sport"="basketball"\]/);
-  assert.match(query, /\["sport"="soccer"\]/);
-  assert.match(query, /\["sport"="football"\]/);
-  assert.match(query, /\["sport"="tennis"\]/);
+  assert.match(query, /\["sport"~"\(\^\|;\)\(basketball\|soccer\|football\|tennis\)\(;\|\$\)"\]/);
   assert.match(query, /around:3000,-33\.868800,151\.209300/);
 });
 
@@ -89,24 +86,42 @@ test('falls back to the next Overpass endpoint after a 429 response', async () =
   });
 
   assert.deepEqual(result.elements, [{ id: 1 }]);
-  assert.deepEqual(calls.map(call => call.method), ['POST', 'POST']);
+  assert.deepEqual(calls.map(call => call.method), ['GET', 'GET']);
 });
 
-test('retries a 406 form POST as a GET data query', async () => {
+test('retries a GET rejection as a form POST data query', async () => {
   const calls = [];
   const result = await fetchSportsFacilities('query', {
     endpoints: ['https://primary.example/interpreter'],
     fetchImpl: async (url, options) => {
       calls.push({ url: String(url), method: options.method || 'GET' });
-      return options.method === 'POST'
+      return (options.method || 'GET') === 'GET'
         ? jsonResponse(406, {})
         : jsonResponse(200, { elements: [{ id: 2 }] });
     },
   });
 
   assert.deepEqual(result.elements, [{ id: 2 }]);
-  assert.equal(calls[1].method, 'GET');
-  assert.match(calls[1].url, /data=query/);
+  assert.equal(calls[0].method, 'GET');
+  assert.match(calls[0].url, /data=query/);
+  assert.equal(calls[1].method, 'POST');
+});
+
+test('refreshes a cached empty result quickly instead of holding it for 30 minutes', async () => {
+  const cache = new Map([
+    ['-33.869,151.209', { timestamp: 0, data: { elements: [] } }],
+  ]);
+  const handler = createSportsLocationsHandler({
+    cache,
+    now: () => 2 * 60 * 1000,
+    fetchFacilities: async () => ({ elements: [{ id: 10 }] }),
+    logger: { error() {} },
+  });
+  const res = makeResponse();
+
+  await handler({ query: { lat: '-33.8688', lng: '151.2093' } }, res);
+
+  assert.deepEqual(res.body, { elements: [{ id: 10 }], stale: false });
 });
 
 test('returns an empty successful result when no nearby facilities match', async () => {

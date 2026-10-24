@@ -895,7 +895,7 @@ function renderDiscover(self){
   </div>`;
 }
 // ---------- map ----------
-const { matchesSportFilter, sportFilterLabel } = window.QuestFitMapUtils;
+const { facilityIdentity, matchesSportFilter, sportFilterLabel } = window.QuestFitMapUtils;
 
 function renderMap(){
   return `
@@ -1088,8 +1088,8 @@ function displaySportsMarkers({ updateStatus = true } = {}) {
 
         if (lat == null || lng == null) return;
 
-        const name = place.tags?.name || 'Sports Facility';
         const sport = place.tags?.sport || '';
+        const identity = facilityIdentity(place.tags);
 
         if (!matchesSportFilter(sport, selectedSport)) return;
 
@@ -1097,12 +1097,25 @@ function displaySportsMarkers({ updateStatus = true } = {}) {
         const popup = document.createElement('div');
 
         const title = document.createElement('strong');
-        title.textContent = name;
+        title.textContent = identity.displayName;
 
         const description = document.createElement('p');
         description.textContent = `Sport: ${sport || 'Not specified'}`;
 
         popup.append(title, description);
+
+        const addDetail = (label, value) => {
+          if (!value) return;
+          const detail = document.createElement('p');
+          detail.className = 'facility-detail';
+          detail.textContent = `${label}: ${value}`;
+          popup.append(detail);
+        };
+        if (identity.nameSource !== 'brand') addDetail('Brand', identity.brand);
+        if (identity.nameSource !== 'operator') addDetail('Operator', identity.operator);
+        if (identity.nameSource !== 'club') addDetail('Club', identity.club);
+        addDetail('Address', identity.address);
+        if (identity.nameSource === 'missing') addDetail('Note', 'This facility has no name recorded in OpenStreetMap.');
 
         // Add marker
         L.marker([lat, lng], { icon: facilityPinIcon })

@@ -7,7 +7,7 @@ const {
   fetchSportsFacilities,
   validateCoordinates,
 } = require('../server/sports-locations');
-const { matchesSportFilter, normaliseSportTags, sportFilterLabel } = require('../public/map-utils');
+const { facilityIdentity, matchesSportFilter, normaliseSportTags, sportFilterLabel } = require('../public/map-utils');
 
 function jsonResponse(status, body) {
   return {
@@ -46,6 +46,34 @@ test('matches semicolon-delimited sport tags and treats football as soccer', () 
   assert.equal(matchesSportFilter('basketball;tennis', 'tennis'), true);
   assert.equal(matchesSportFilter('basketball', 'soccer'), false);
   assert.equal(sportFilterLabel('soccer'), 'football');
+});
+
+test('uses the real facility name and retains brand, operator, club, and address details', () => {
+  assert.deepEqual(facilityIdentity({
+    name: 'Harbour Tennis Centre',
+    brand: 'Court Club',
+    operator: 'City of Sydney',
+    club: 'Harbour Aces',
+    'addr:housenumber': '10',
+    'addr:street': 'Example Road',
+    'addr:suburb': 'Sydney',
+  }), {
+    displayName: 'Harbour Tennis Centre',
+    nameSource: 'name',
+    brand: 'Court Club',
+    operator: 'City of Sydney',
+    club: 'Harbour Aces',
+    address: '10 Example Road, Sydney',
+  });
+
+  assert.deepEqual(facilityIdentity({ operator: 'Northern Council' }), {
+    displayName: 'Northern Council',
+    nameSource: 'operator',
+    brand: '',
+    operator: 'Northern Council',
+    club: '',
+    address: '',
+  });
 });
 
 test('falls back to the next Overpass endpoint after a 429 response', async () => {

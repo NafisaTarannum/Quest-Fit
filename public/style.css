@@ -483,6 +483,11 @@
 .sport-map-pin.user { background: #e43b44; }
 .sport-map-pin.facility { background: #2878d4; }
 
+.facility-detail {
+  margin: 4px 0 0;
+  color: #4a5568;
+}
+
 .map-retry {
   border: 0;
   border-radius: 6px;

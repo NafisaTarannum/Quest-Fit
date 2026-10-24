@@ -895,23 +895,24 @@ function renderDiscover(self){
   </div>`;
 }
 // ---------- map ----------
+const { matchesSportFilter, sportFilterLabel } = window.QuestFitMapUtils;
+
 function renderMap(){
   return `
     <div class="map-page">
       <h2>🗺️ Explore Sports Nearby</h2>
       <p>Discover sports activities and places around you.</p>
-<div class="map-filters">
-  <label for="sport-filter">Filter by sport:</label>
-
-  <select id="sport-filter">
-    <option value="all">🏅 All Sports</option>
-    <option value="basketball">🏀 Basketball</option>
-    <option value="soccer">⚽ Football</option>
-    <option value="tennis">🎾 Tennis</option>
-  </select>
-</div>
-      <div id="quest-map"></div>
+      <div class="map-filters">
+        <label for="sport-filter">Filter by sport:</label>
+        <select id="sport-filter">
+          <option value="all">🏅 All Sports</option>
+          <option value="basketball">🏀 Basketball</option>
+          <option value="soccer">⚽ Football (Soccer)</option>
+          <option value="tennis">🎾 Tennis</option>
+        </select>
       </div>
+      <div id="map-status" class="map-status loading" role="status" aria-live="polite">Finding nearby sports facilities…</div>
+      <div id="quest-map"></div>
     </div>
   `;
 }
@@ -925,6 +926,36 @@ let currentMapLat = -33.8688;
 let currentMapLng = 151.2093;
 
 let sportsRequestId = 0;
+let sportsFetchController = null;
+let sportsLoading = false;
+
+function setMapStatus(type, message, { retry = false } = {}) {
+  const status = document.getElementById('map-status');
+  if (!status) return;
+
+  status.className = `map-status ${type}`;
+  status.textContent = message;
+
+  if (retry) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'map-retry';
+    button.textContent = 'Try again';
+    button.onclick = () => loadSportsLocations(currentMapLat, currentMapLng);
+    status.append(' ', button);
+  }
+}
+
+function resultsStatus(count) {
+  const label = sportFilterLabel(selectedSport);
+  if (count === 0) {
+    return selectedSport === 'all'
+      ? 'No basketball, football, or tennis facilities were found within 3 km of this location.'
+      : `No ${label} facilities were found within 3 km of this location.`;
+  }
+  return `Showing ${count} nearby ${label} facilit${count === 1 ? 'y' : 'ies'}.`;
+}
+
 function initMap() {
   const mapContainer = document.getElementById('quest-map');
 
@@ -936,8 +967,8 @@ function initMap() {
     questMap = null;
   }
 
-  // Sydney coordinates
-  questMap = L.map('quest-map').setView([-33.8688, 151.2093], 12);
+  // Sydney is the initial view; the location control can update this later.
+  questMap = L.map('quest-map').setView([currentMapLat, currentMapLng], 12);
   // Create a layer to manage sports facility markers
 sportsMarkers = L.layerGroup().addTo(questMap);
 const sportFilter = document.getElementById('sport-filter');
@@ -946,9 +977,9 @@ if (sportFilter) {
     sportFilter.value = selectedSport;
 
     sportFilter.addEventListener('change', function () {
-    selectedSport = this.value;
-    displaySportsMarkers();
-});
+      selectedSport = this.value;
+      displaySportsMarkers();
+    });
 }
 // Current Location button
 const locationControl = L.control({ position: 'topright' });
@@ -980,9 +1011,8 @@ locationControl.onAdd = function () {
       function (position) {
         const lat = position.coords.latitude;
         const lng = position.coords.longitude;
-        // Remember the user's location for sports filtering
-currentMapLat = lat;
-currentMapLng = lng;
+        currentMapLat = lat;
+        currentMapLng = lng;
 
         questMap.setView([lat, lng], 15);
 
@@ -990,8 +1020,8 @@ currentMapLng = lng;
           .addTo(questMap)
           .bindPopup('📍 You are here!')
           .openPopup();
-          // Load sports facilities near the user's current location
-loadSportsLocations(lat, lng);
+        // Load sports facilities near the user's current location.
+        loadSportsLocations(lat, lng);
       },
       function (error) {
         alert('Unable to get your location: ' + error.message);
@@ -1023,16 +1053,17 @@ locationControl.addTo(questMap);
   setTimeout(() => {
     if (questMap) questMap.invalidateSize();
   }, 100);
-  // Load real sports facilities from OpenStreetMap
-loadSportsLocations();
+  // Load real sports facilities from OpenStreetMap.
+  loadSportsLocations(currentMapLat, currentMapLng);
 }
 // ---------- Display sports markers ----------
-function displaySportsMarkers() {
+function displaySportsMarkers({ updateStatus = true } = {}) {
     if (!questMap || !sportsMarkers) return;
 
     // Clear existing sports markers
     sportsMarkers.clearLayers();
 
+    let markerCount = 0;
     cachedSportsLocations.forEach(place => {
         const lat = place.lat ?? place.center?.lat;
         const lng = place.lon ?? place.center?.lon;
@@ -1040,16 +1071,9 @@ function displaySportsMarkers() {
         if (lat == null || lng == null) return;
 
         const name = place.tags?.name || 'Sports Facility';
-        const sport = place.tags?.sport || 'Sport';
+        const sport = place.tags?.sport || '';
 
-        // Filter by selected sport
-        if (selectedSport !== 'all') {
-            const sports = sport.toLowerCase()
-                .split(';')
-                .map(s => s.trim());
-
-            if (!sports.includes(selectedSport)) return;
-        }
+        if (!matchesSportFilter(sport, selectedSport)) return;
 
         // Create popup
         const popup = document.createElement('div');
@@ -1058,7 +1082,7 @@ function displaySportsMarkers() {
         title.textContent = name;
 
         const description = document.createElement('p');
-        description.textContent = `Sport: ${sport}`;
+        description.textContent = `Sport: ${sport || 'Not specified'}`;
 
         popup.append(title, description);
 
@@ -1066,66 +1090,59 @@ function displaySportsMarkers() {
         L.marker([lat, lng])
             .addTo(sportsMarkers)
             .bindPopup(popup);
+        markerCount += 1;
     });
+
+    if (updateStatus && !sportsLoading) setMapStatus(markerCount ? 'success' : 'empty', resultsStatus(markerCount));
+    return markerCount;
 }
 // ---------- Fetch real sports locations ----------
 async function loadSportsLocations(lat = -33.8688, lng = 151.2093) {
   if (!questMap) return;
-  // Give each sports request a unique number
-const requestId = ++sportsRequestId;
-  // Remove previous sports markers before loading new ones
-if (sportsMarkers) {
+  currentMapLat = lat;
+  currentMapLng = lng;
+  const requestId = ++sportsRequestId;
+  if (sportsFetchController) sportsFetchController.abort();
+  sportsFetchController = new AbortController();
+  sportsLoading = true;
+
+  // Never leave markers from a previous location visible while a new
+  // request is in progress.
+  if (sportsMarkers) {
     sportsMarkers.clearLayers();
-}
+  }
+  setMapStatus('loading', 'Finding nearby sports facilities…');
 
   const map = questMap;
 
-  // Search for sports facilities within 3 km of Sydney CBD
-  const query = `
-  [out:json][timeout:25];
-  (
-    nwr["leisure"="pitch"]["sport"~"basketball|soccer|tennis"](around:3000,${lat},${lng});
-  );
-  out center;
-`;
-
   try {
-    const response = await fetch(
-  `/api/sports-locations?lat=${lat}&lng=${lng}`
-);
+    const response = await fetch(`/api/sports-locations?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, {
+      signal: sportsFetchController.signal,
+    });
+    const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error('Failed to fetch sports locations');
+      throw new Error(data.error || 'Unable to load nearby sports facilities.');
     }
 
-    const data = await response.json();
-    // Store downloaded sports facilities
-cachedSportsLocations = data.elements || [];
+    // Ignore an earlier location request that completed after a newer one.
+    if (requestId !== sportsRequestId || questMap !== map) return;
 
-// Display markers using the selected sport
-displaySportsMarkers();
-    // Ignore outdated requests
-if (requestId !== sportsRequestId) {
-    return;
-}
-
+    cachedSportsLocations = Array.isArray(data.elements) ? data.elements : [];
+    sportsLoading = false;
+    const markerCount = displaySportsMarkers({ updateStatus: false });
+    if (data.stale) {
+      setMapStatus('warning', `${data.warning || 'Live sports data is temporarily unavailable.'} ${resultsStatus(markerCount)}`);
+    } else {
+      setMapStatus(markerCount ? 'success' : 'empty', resultsStatus(markerCount));
+    }
+  } catch (error) {
+    if (error.name === 'AbortError' || requestId !== sportsRequestId) return;
     // Don't add markers to an old map after switching tabs
     if (questMap !== map) return;
-    // Store downloaded sports facilities
-cachedSportsLocations = data.elements || [];
-
-// Display markers using the selected sport
-displaySportsMarkers();
-
-console.log(`Loaded ${cachedSportsLocations.length} sports locations`);
-
-
-
-    console.log(`Loaded ${data.elements.length} sports locations`);
-
-  } catch (error) {
-    if (requestId !== sportsRequestId) return;
+    sportsLoading = false;
     console.error('Error loading sports locations:', error);
+    setMapStatus('error', `${error.message} You can retry when the service is available.`, { retry: true });
   }
 }
 function renderSearch(){

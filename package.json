@@ -4,7 +4,8 @@
   "description": "Quest Fit - connect with people who share your sport interests",
   "main": "server/server.js",
   "scripts": {
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

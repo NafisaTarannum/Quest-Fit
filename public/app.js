@@ -309,6 +309,9 @@ function passwordValid(pw){
 
 // ---------- auth ----------
 async function checkSession(){
+  // Keep the splash screen visible briefly.
+  await new Promise(resolve => setTimeout(resolve, 3000));
+
   if(!getToken()){ return setState({screen:'login'}); }
   const data = await api('/me');
   if(data.user){
@@ -717,14 +720,97 @@ async function sendMessage(text, inputEl){
 function esc(s){ const d=document.createElement('div'); d.innerText = s==null?'':String(s); return d.innerHTML; }
 
 function renderAuth(){
-  if(state.screen === 'loading'){
-    return `<div class="auth-wrap"><div class="auth-card auth-loading-card">
-      <div class="auth-loading-logo" aria-hidden="true">Q</div>
-      <div class="auth-loading-title">QuestFit</div>
-      <div class="auth-loading-subtitle">Getting your next adventure ready</div>
-      <div class="auth-loading-track" aria-hidden="true"><span></span></div>
-    </div></div>`;
-  }
+  
+if(state.screen === 'loading'){
+  return `
+    <style>
+      @keyframes questfitSpin {
+        to { transform: rotate(360deg); }
+      }
+      .qf-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: space-between;
+        padding: 60px 24px 40px;
+        text-align: center;
+        background: linear-gradient(
+          180deg, #1c3d5a 0%, #2a5078 30%,
+          #3d6388 60%, #182638 100%
+        );
+      }
+      .qf-splash-content {
+        position: relative;
+        z-index: 2;
+        margin-top: 20px;
+      }
+      .qf-splash-title {
+        margin: 8px 0 0;
+        color: #fff;
+        font-size: 42px;
+        font-weight: 900;
+        letter-spacing: -1px;
+      }
+      .qf-splash-title span { color: #86EFAC; }
+      .qf-splash-tagline {
+        margin-top: 8px;
+        color: #e2effc;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      .qf-splash-mountains {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        height: 65%;
+        pointer-events: none;
+      }
+      .qf-splash-loader {
+        position: relative;
+        z-index: 2;
+        width: 36px;
+        height: 36px;
+        margin-bottom: 20px;
+        border: 3px solid rgba(255,255,255,.2);
+        border-top-color: #86EFAC;
+        border-radius: 50%;
+        animation: questfitSpin 1s linear infinite;
+      }
+      @media (max-height: 500px) {
+        .qf-splash { padding-top: 20px; padding-bottom: 15px; }
+        .qf-splash-mountains { height: 55%; }
+      }
+    </style>
+    <div class="qf-splash">
+      <div class="qf-splash-content">
+        <svg width="60" height="35" viewBox="0 0 100 60" fill="none" aria-hidden="true">
+          <path d="M10 50 L40 15 L58 35 L72 20 L90 50 Z"
+            stroke="#86EFAC" stroke-width="8"
+            stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <h1 class="qf-splash-title">Quest<span>Fit</span></h1>
+        <div class="qf-splash-tagline">Real Actions. Bigger Rewards.</div>
+      </div>
+      <svg class="qf-splash-mountains" viewBox="0 0 500 500"
+        preserveAspectRatio="none" aria-hidden="true">
+        <path d="M0 500 L0 320 L120 180 L220 280 L350 120 L500 300 L500 500 Z"
+          fill="#2d496b" opacity=".6"/>
+        <path d="M0 500 L0 380 L160 220 L270 340 L400 190 L500 330 L500 500 Z"
+          fill="#1b2f48" opacity=".8"/>
+        <path d="M0 500 L0 420 L110 320 L200 400 L320 280 L440 390 L500 330 L500 500 Z"
+          fill="#0d1928"/>
+        <path d="M350 120 L325 155 L340 160 Z" fill="#fff" opacity=".8"/>
+        <path d="M120 180 L105 205 L118 210 Z" fill="#fff" opacity=".8"/>
+      </svg>
+      <div class="qf-splash-loader" role="status" aria-label="Loading"></div>
+    </div>`;
+}
+
   if(state.screen === 'signup'){
     const f = state.signupForm;
     const pc = passwordChecks(f.password);
@@ -1928,4 +2014,6 @@ function wireAppEvents(){
   }
 }
 
+render();
 checkSession();
+

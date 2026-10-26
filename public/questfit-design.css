@@ -1,0 +1,141 @@
+/* QuestFit designer interface integration.
+   This file changes presentation only; app.js, API routes and database logic stay intact. */
+
+:root {
+  --bg: #0D0E11;
+  --panel: #17191E;
+  --panel-2: #21242B;
+  --line: #383227;
+  --ink: #E8E3D5;
+  --ink-dim: #B0A895;
+  --ink-faint: #817968;
+  --lime: #D4AF37;
+  --lime-dim: #A88927;
+  --amber: #D4AF37;
+  --danger: #FF4D6D;
+  --radius: 14px;
+  font-size: 16px;
+}
+
+html{background:var(--bg);}
+body{
+  background:radial-gradient(ellipse at 50% -15%,rgba(0,229,160,.12),transparent 42%),
+             radial-gradient(ellipse at 100% 45%,rgba(126,34,206,.10),transparent 35%),var(--bg);
+  color:var(--ink);font-family:Poppins,Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+}
+#app{max-width:1120px;padding:0 22px 70px;}
+.display{font-family:Poppins,Inter,ui-sans-serif,system-ui,sans-serif;text-transform:none;letter-spacing:-.045em;transform:none;font-weight:800;}
+.topbar{padding:20px 0 18px;border-bottom-color:var(--line);margin-bottom:24px;gap:16px;}
+.brand{gap:12px;}
+.brand-mark{width:42px;height:42px;border-radius:14px;background:linear-gradient(145deg,#00E5A0,#00A878);color:#061326;transform:none;box-shadow:0 8px 28px rgba(0,229,160,.18);}
+.brand-name,.brand-name .display{font-size:24px;letter-spacing:-.045em;}
+.brand-tag{font-size:12px;color:#91A1BC;}
+.user-pill{background:rgba(11,19,43,.82);border-color:var(--line);padding:7px 9px;border-radius:999px;}
+.user-pill-clickable:hover{background:rgba(0,229,160,.08);}
+.btn{border-radius:12px;padding:11px 16px;font-weight:700;transition:transform .15s ease,filter .15s ease,background .15s ease;}
+.btn:active{transform:scale(.97);}
+.btn-lime{background:linear-gradient(135deg,#00E5A0,#00C78A);color:#041426;box-shadow:0 5px 18px rgba(0,229,160,.12);}
+.btn-lime:hover{filter:brightness(1.06);opacity:1;}
+.btn-ghost{border-color:var(--line);background:rgba(255,255,255,.025);color:#B9C5D9;}
+.btn-ghost:hover{background:rgba(255,255,255,.06);border-color:rgba(0,229,160,.35);color:white;}
+.btn-danger{color:#FDA4AF;border-color:rgba(251,113,133,.35);}
+.tabs{display:flex;gap:8px;margin:0 0 24px;padding:7px;border:1px solid var(--line);border-radius:18px;background:rgba(11,19,43,.78);}
+.tab{flex:1;text-align:center;padding:11px 12px;border-radius:12px;border:1px solid transparent;color:#9AAAC5;font-size:12px;letter-spacing:.015em;text-transform:none;transition:all .18s ease;}
+.tab:hover{color:white;background:rgba(255,255,255,.035);}
+.tab.active{background:linear-gradient(135deg,rgba(0,229,160,.16),rgba(0,199,138,.07));border-color:rgba(0,229,160,.24);color:#00E5A0;box-shadow:inset 0 0 0 1px rgba(0,229,160,.025);}
+.tab .count,.tab.active .count{color:#00E5A0;}
+.auth-wrap{min-height:84vh;padding:26px 0;}
+.auth-card{max-width:460px;background:linear-gradient(155deg,rgba(14,27,56,.97),rgba(7,14,31,.98));border:1px solid rgba(148,163,184,.19);border-radius:28px;padding:36px 32px;box-shadow:0 28px 90px rgba(0,0,0,.32),0 0 0 1px rgba(0,229,160,.025);}
+.auth-hero{margin-bottom:28px;}
+.auth-hero .display{font-size:36px;line-height:1.08;color:#F8FAFF;}
+.auth-hero .display span{color:#00E5A0;}
+.auth-hero p{color:#9EADC7;line-height:1.65;font-size:14px;}
+.field label{color:#8FA0BC;letter-spacing:.08em;font-size:11px;}
+.field input,.field select{background:#081329;border:1px solid rgba(148,163,184,.2);color:#F7FAFF;padding:13px 14px;border-radius:12px;}
+.field input:focus,.field select:focus{outline:2px solid rgba(0,229,160,.55);outline-offset:1px;border-color:transparent;}
+.chip{border-radius:12px!important;border-color:rgba(148,163,184,.18)!important;background:#0A1630!important;}
+.chip.selected{background:rgba(0,229,160,.13)!important;border-color:rgba(0,229,160,.6)!important;color:#00E5A0!important;}
+.note-box{border-radius:14px;background:rgba(0,229,160,.055);border-color:rgba(0,229,160,.15);}
+.error-box{border-radius:12px;}
+/* Match the visual language of the supplied UI design across existing app screens. */
+.card,.profile-card,.person-card,.panel,.section-card,.match-card,.search-card,.chat-panel,.modal-card,.map-panel,.post-tile{
+  border-radius:20px;
+}
+.card,.profile-card,.person-card,.panel,.section-card,.match-card,.search-card,.chat-panel,.modal-card{
+  border-color:var(--line);
+}
+input,select,textarea{accent-color:#00E5A0;}
+input:not([type=checkbox]):not([type=radio]),select,textarea{border-radius:12px;}
+button:focus-visible,[role=button]:focus-visible,.tab:focus-visible{outline:2px solid #00E5A0;outline-offset:3px;}
+.footer-note{color:#64748B;padding-top:28px;}
+.meetup-banner{border-radius:16px;border-color:rgba(0,229,160,.22);background:rgba(0,229,160,.07);}
+/* Loading screen */
+.auth-loading-card{display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;padding:44px 28px;}
+.auth-loading-logo{width:66px;height:66px;border-radius:22px;display:grid;place-items:center;color:#041426;font-weight:900;font-size:30px;background:linear-gradient(145deg,#00E5A0,#00A878);box-shadow:0 0 42px rgba(0,229,160,.2);animation:qf-pulse 1.5s ease-in-out infinite;}
+.auth-loading-title{font-size:25px;font-weight:800;letter-spacing:-.04em;}
+.auth-loading-subtitle{font-size:13px;color:#9EADC7;}
+.auth-loading-track{width:150px;height:4px;border-radius:99px;background:#182541;overflow:hidden;margin-top:8px;}
+.auth-loading-track span{display:block;width:45%;height:100%;border-radius:99px;background:#00E5A0;animation:qf-load 1.2s ease-in-out infinite;}
+@keyframes qf-pulse{50%{transform:translateY(-3px);box-shadow:0 0 54px rgba(0,229,160,.32)}}
+@keyframes qf-load{from{transform:translateX(-110%)}to{transform:translateX(340%)}}
+@media(max-width:680px){
+  #app{padding:0 14px calc(94px + env(safe-area-inset-bottom));}
+  .topbar{align-items:flex-start;padding:16px 0 14px;margin-bottom:18px;}
+  .brand-mark{width:38px;height:38px;border-radius:13px;}
+  .brand-name,.brand-name .display{font-size:21px;}
+  .brand-tag{font-size:11px;}
+  .user-pill{gap:5px;padding:5px;}
+  .user-pill .who{display:none;}
+  .user-pill-clickable{gap:5px;font-size:12px;}
+  .user-pill .btn{padding:7px 9px;font-size:11px;}
+  .tabs{position:fixed;z-index:1000;left:10px;right:10px;bottom:calc(8px + env(safe-area-inset-bottom));margin:0;padding:6px;gap:3px;border-radius:19px;background:rgba(5,11,24,.94);backdrop-filter:blur(18px);box-shadow:0 12px 38px rgba(0,0,0,.38);}
+  .tab{padding:11px 3px;font-size:10px;border-radius:12px;white-space:nowrap;}
+  .auth-wrap{min-height:78vh;padding:16px 0;}
+  .auth-card{padding:28px 21px;border-radius:24px;}
+  .auth-hero .display{font-size:31px;}
+  .field-row{gap:10px;}
+  .footer-note{padding-bottom:8px;}
+}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;}}
+
+
+/* ===== Dark Obsidian + Gold theme from the supplied design, preserving the real app and map ===== */
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+:root{
+  --bg:#090a0c; --panel:#17191e; --panel-2:#21242b;
+  --line:rgba(212,175,55,.25); --ink:#e8e3d5; --ink-dim:#b5ad9b;
+  --ink-faint:#8f887a; --lime:#d4af37; --lime-dim:#b99224;
+  --amber:#d4af37; --danger:#e03e3e; --radius:12px;
+}
+html,body{background:#090a0c!important;color:var(--ink)!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif!important;}
+body{background:radial-gradient(ellipse at 50% -15%,rgba(212,175,55,.08),transparent 42%),#090a0c!important;}
+.display,.brand-name,.brand-name .display,.tab,.auth-loading-title,.auth-hero .display,h1,h2,h3{font-family:Cinzel,Georgia,serif!important;letter-spacing:.01em!important;}
+.topbar{background:#111216!important;border-bottom:1px solid #8e7225!important;box-shadow:0 4px 15px rgba(0,0,0,.6)!important;}
+.brand-mark{background:linear-gradient(145deg,#d4af37,#755a16)!important;color:#0d0e11!important;box-shadow:0 0 16px rgba(212,175,55,.22)!important;border-radius:10px!important;}
+.brand-name .display,.brand-name{color:#f4efdf!important;}
+.brand-tag,.hint,.footer-note{color:#9e9787!important;}
+.user-pill{background:#17191e!important;border-color:var(--line)!important;}
+.tabs{background:rgba(17,18,22,.96)!important;border-color:var(--line)!important;border-radius:12px!important;}
+.tab{color:#9e9787!important;border-radius:7px!important;}
+.tab.active{background:rgba(212,175,55,.12)!important;border-color:rgba(212,175,55,.42)!important;color:#d4af37!important;box-shadow:inset 0 0 0 1px rgba(212,175,55,.05)!important;}
+.card,.profile-card,.person-card,.panel,.section-card,.match-card,.search-card,.chat-panel,.modal-card,.map-panel,.post-tile,.auth-card{
+ background:linear-gradient(145deg,#17191e,#101114)!important;border-color:#383227!important;border-radius:12px!important;box-shadow:0 5px 16px rgba(0,0,0,.32)!important;
+}
+.btn-lime,.auth-loading-logo{background:linear-gradient(180deg,#2e281a,#17130b)!important;color:#d4af37!important;border:1px solid #d4af37!important;box-shadow:0 4px 8px rgba(0,0,0,.35)!important;}
+.btn-lime:hover{background:#d4af37!important;color:#090a0c!important;filter:none!important;}
+.btn-ghost{background:#21242b!important;border-color:#383227!important;color:#e8e3d5!important;}
+.btn-ghost:hover{border-color:#d4af37!important;color:#d4af37!important;}
+.btn-danger{color:#ef7777!important;border-color:rgba(224,62,62,.5)!important;}
+input:not([type=checkbox]):not([type=radio]),select,textarea,.field input,.field select{background:#090a0c!important;border-color:#383227!important;color:#e8e3d5!important;}
+.field label{color:#9e9787!important;}
+input:focus,select:focus,textarea:focus{outline:1px solid rgba(212,175,55,.65)!important;}
+.chip{background:#21242b!important;border-color:#383227!important;color:#b5ad9b!important;}
+.chip.selected{background:rgba(212,175,55,.12)!important;border-color:#d4af37!important;color:#d4af37!important;}
+.note-box,.meetup-banner{background:rgba(212,175,55,.07)!important;border-color:rgba(212,175,55,.25)!important;}
+.auth-loading-logo{animation:qf-pulse 1.5s ease-in-out infinite;}
+.auth-loading-track{background:#383227!important;}.auth-loading-track span{background:#d4af37!important;}
+/* Map remains enabled; only its surrounding theme colors are changed. */
+.map-page,.map-panel{color:var(--ink)!important;}
+.map-legend{background:#17191e!important;color:#e8e3d5!important;border-color:#383227!important;}
+.map-status{background:#17191e!important;color:#d4af37!important;border-color:#383227!important;}
+@media(max-width:680px){.tabs{background:rgba(17,18,22,.97)!important;}}

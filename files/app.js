@@ -1178,24 +1178,14 @@ async function render(){
         <button class="btn btn-ghost btn-sm" id="notif-dismiss-btn">Not now</button>
       </div>
     </div>` : ''}
-    <div class="qf-workspace">
-      <aside class="qf-sidebar" aria-label="Main navigation">
-        <div class="qf-side-brand"><div class="qf-side-mark">Q</div><div><strong>QUESTFIT</strong><small>MOVE · CONNECT · GROW</small></div></div>
-        <div class="qf-side-label">YOUR SPACE</div>
-        <nav class="qf-side-nav">
-          <button class="tab qf-nav-item ${state.tab==='discover'?'active':''}" data-tab="discover"><span class="qf-nav-icon">✦</span><span>Discover</span><span class="qf-nav-arrow">›</span></button>
-          <button class="tab qf-nav-item ${state.tab==='search'?'active':''}" data-tab="search"><span class="qf-nav-icon">⌕</span><span>Find Friends</span><span class="qf-nav-arrow">›</span></button>
-          <button class="tab qf-nav-item ${state.tab==='matches'?'active':''}" data-tab="matches"><span class="qf-nav-icon">◈</span><span>Matches & Chat</span><span class="qf-nav-count">${state.myMatches.incoming.length||''}</span></button>
-          <button class="tab qf-nav-item ${state.tab==='profile'?'active':''}" data-tab="profile"><span class="qf-nav-icon">◎</span><span>My Profile</span><span class="qf-nav-arrow">›</span></button>
-        </nav>
-        <div class="qf-sidebar-bottom"><div class="qf-status-dot"></div><span>YOUR QUEST IS ACTIVE</span></div>
-      </aside>
-      <main class="qf-main-content">
-        <div class="qf-page-heading"><div><div class="qf-eyebrow">THE ARENA</div><h1>${({discover:'Discover',search:'Find Friends',matches:'Matches & Chat',profile:'My Profile'})[state.tab]||'QuestFit'}</h1><p>${({discover:'Find your next teammate.',search:'Find people who share your sports.',matches:'Build connections and plan your next game.',profile:'Your journey, your sports, your story.'})[state.tab]||'Move · Connect · Grow'}</p></div><div class="qf-heading-badge">✧ <span>PLAYER HUB</span></div></div>
-        <section class="qf-page-content">${tabContent}</section>
-        <div class="footer-note">QUESTFIT <span>·</span> MOVE · CONNECT · GROW</div>
-      </main>
+    <div class="tabs">
+      <div class="tab ${state.tab==='discover'?'active':''}" data-tab="discover">Discover</div>
+      <div class="tab ${state.tab==='search'?'active':''}" data-tab="search">Search</div>
+      <div class="tab ${state.tab==='matches'?'active':''}" data-tab="matches">Matches<span class="count">${state.myMatches.incoming.length||''}</span></div>
+      <div class="tab ${state.tab==='profile'?'active':''}" data-tab="profile">Profile</div>
     </div>
+    ${tabContent}
+    <div class="footer-note">Quest Fit · running on your own server, data stored in a cloud Postgres database.</div>
   `;
 
   if(state.matchModal){
@@ -1552,5 +1542,3 @@ function wireAppEvents(){
 }
 
 checkSession();
-
-

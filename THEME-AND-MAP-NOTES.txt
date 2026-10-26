@@ -1,0 +1,5 @@
+QuestFit Dark Obsidian + Gold theme
+
+This update changes CSS presentation only. It keeps the existing public/app.js, server routes, database logic, Leaflet scripts, map-utils.js, and map feature from the integration package.
+
+To use: replace your current project folder with this project folder or copy public/questfit-design.css into your existing project. Keep your existing .env file private and do not overwrite it with a ZIP copy.

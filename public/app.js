@@ -56,6 +56,7 @@ let state = {
   activeChatWith: null,
   chatMessages: [],
   chatLoading: false,
+
   meetups: [],
   meetupsLoading: false,
   meetupModalOpen: false,
@@ -63,6 +64,7 @@ let state = {
   meetupSaving: false,
   meetupError: '',
   toast: null,
+
   profileModalOpen: false,
   profileForm: null,       // {bio, avatarEmoji, avatarColor, title, photoDataUrl}
   profileSaving: false,
@@ -83,7 +85,33 @@ let state = {
 };
 
 function setState(patch){ state = {...state, ...patch}; render(); }
-function showToast(msg){ setState({toast: msg}); setTimeout(()=>{ if(state.toast===msg) setState({toast:null}); }, 2600); }
+
+// Toasts fire very frequently - on essentially every live event from
+// another user (a message, a match request, a match acceptance) - so
+// routing them through setState()/render() would force a full rebuild of
+// the entire current page (including any images on screen, e.g. a posts
+// grid) twice per toast: once to show it, once to hide it. That's wasteful
+// and can visibly bog down the browser, especially with multiple tabs
+// open. Toasts render directly instead, completely independent of the
+// main state/render cycle.
+function getToastContainer(){
+  let el = document.getElementById('toast-container');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'toast-container';
+    el.className = 'toast-container';
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function showToast(msg){
+  const container = getToastContainer();
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
 
 // ---------- live chat (WebSocket) ----------
 let liveSocket = null;
@@ -574,13 +602,17 @@ async function loadMyMatches(){
 async function refreshMyMatches(){
   const data = await api('/matches');
   if(data.error) return;
-  setState({
-    myMatches: {
-      incoming: data.incoming || [],
-      sent: data.sent || [],
-      accepted: data.accepted || [],
-    }
-  });
+  const next = {
+    incoming: data.incoming || [],
+    sent: data.sent || [],
+    accepted: data.accepted || [],
+  };
+  // This gets called after almost every live event and swipe action, but
+  // the data frequently hasn't actually changed. Skipping a no-op render
+  // avoids needlessly rebuilding the whole page (including any images
+  // currently on screen) when nothing is actually different.
+  if(JSON.stringify(next) === JSON.stringify(state.myMatches)) return;
+  setState({myMatches: next});
 }
 
 async function acceptMatchRequest(matchId, otherName){
@@ -686,7 +718,12 @@ function esc(s){ const d=document.createElement('div'); d.innerText = s==null?''
 
 function renderAuth(){
   if(state.screen === 'loading'){
-    return `<div class="auth-wrap"><div style="color:var(--ink-dim);">Loading…</div></div>`;
+    return `<div class="auth-wrap"><div class="auth-card auth-loading-card">
+      <div class="auth-loading-logo" aria-hidden="true">Q</div>
+      <div class="auth-loading-title">QuestFit</div>
+      <div class="auth-loading-subtitle">Getting your next adventure ready</div>
+      <div class="auth-loading-track" aria-hidden="true"><span></span></div>
+    </div></div>`;
   }
   if(state.screen === 'signup'){
     const f = state.signupForm;
@@ -862,7 +899,349 @@ function renderDiscover(self){
     ${body}
   </div>`;
 }
+// ---------- map ----------
+const { facilityIdentity, matchesSportFilter, sportFilterLabel } = window.QuestFitMapUtils;
 
+function renderMap(){
+  return `
+    <div class="map-page">
+      <h2>🗺️ Explore Sports Nearby</h2>
+      <p>Discover sports activities and places around you.</p>
+      <div class="map-filters">
+        <label for="sport-filter">Filter by sport:</label>
+        <select id="sport-filter">
+          <option value="all">🏅 All Sports</option>
+          <option value="basketball">🏀 Basketball</option>
+          <option value="soccer">⚽ Football (Soccer)</option>
+          <option value="tennis">🎾 Tennis</option>
+        </select>
+      </div>
+      <div id="map-status" class="map-status loading" role="status" aria-live="polite">Finding nearby sports facilities…</div>
+      <div class="map-legend" aria-label="Map pin legend">
+        <span><i class="map-legend-pin user"></i>You are here</span>
+        <span><i class="map-legend-pin facility"></i>Facility matching the selected sport</span>
+      </div>
+      <div id="quest-map"></div>
+    </div>
+  `;
+}
+// ---------- initialise map ----------
+let questMap = null;
+let sportsMarkers = null;
+let selectedSport = 'all';
+let cachedSportsLocations = [];
+
+let currentMapLat = -33.8688;
+let currentMapLng = 151.2093;
+
+let sportsRequestId = 0;
+let sportsFetchController = null;
+let sportsLoading = false;
+let facilityPinIcon = null;
+let userPinIcon = null;
+let userLocationMarker = null;
+const DIRECT_OVERPASS_ENDPOINT = 'https://overpass-api.de/api/interpreter';
+const SPORTS_SEARCH_RADIUS_METRES = 3_000;
+
+function createMapPinIcon(type, label) {
+  return L.divIcon({
+    className: 'map-pin-icon',
+    html: `<span class="sport-map-pin ${type}" role="img" aria-label="${label}"></span>`,
+    iconSize: [30, 42],
+    iconAnchor: [15, 42],
+    popupAnchor: [0, -38],
+  });
+}
+
+function setMapStatus(type, message, { retry = false } = {}) {
+  const status = document.getElementById('map-status');
+  if (!status) return;
+
+  status.className = `map-status ${type}`;
+  status.textContent = message;
+
+  if (retry) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'map-retry';
+    button.textContent = 'Try again';
+    button.onclick = () => loadSportsLocations(currentMapLat, currentMapLng);
+    status.append(' ', button);
+  }
+}
+
+function resultsStatus(count) {
+  const label = sportFilterLabel(selectedSport);
+  if (count === 0) {
+    return selectedSport === 'all'
+      ? 'No basketball, football, or tennis facilities were found within 3 km of this location.'
+      : `No ${label} facilities were found within 3 km of this location.`;
+  }
+  return `Showing ${count} nearby ${label} facilit${count === 1 ? 'y' : 'ies'}.`;
+}
+
+function buildDirectSportsQuery(lat, lng) {
+  const safeLat = Number(lat).toFixed(6);
+  const safeLng = Number(lng).toFixed(6);
+  const sportPattern = '(^|;)(basketball|soccer|football|tennis)(;|$)';
+
+  return `
+[out:json][timeout:25];
+(
+  nwr(around:${SPORTS_SEARCH_RADIUS_METRES},${safeLat},${safeLng})["sport"~"${sportPattern}"];
+);
+out center;
+`;
+}
+
+async function fetchSportsLocationsDirectly(lat, lng, signal) {
+  const url = new URL(DIRECT_OVERPASS_ENDPOINT);
+  url.searchParams.set('data', buildDirectSportsQuery(lat, lng));
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error('OpenStreetMap could not load nearby facilities.');
+
+  return { elements: Array.isArray(data.elements) ? data.elements : [] };
+}
+
+function initMap() {
+  const mapContainer = document.getElementById('quest-map');
+
+  if (!mapContainer || typeof L === 'undefined') return;
+
+  // Clean up the previous map instance
+  if (questMap) {
+    questMap.remove();
+    questMap = null;
+    userLocationMarker = null;
+  }
+
+  // Sydney is the initial view; the location control can update this later.
+  questMap = L.map('quest-map').setView([currentMapLat, currentMapLng], 12);
+  facilityPinIcon = createMapPinIcon('facility', 'Sports facility');
+  userPinIcon = createMapPinIcon('user', 'Your location');
+  // Create a layer to manage sports facility markers
+sportsMarkers = L.layerGroup().addTo(questMap);
+const sportFilter = document.getElementById('sport-filter');
+
+if (sportFilter) {
+    sportFilter.value = selectedSport;
+
+    sportFilter.addEventListener('change', function () {
+      selectedSport = this.value;
+      displaySportsMarkers();
+    });
+}
+// Current Location button
+const locationControl = L.control({ position: 'topright' });
+
+locationControl.onAdd = function () {
+  const button = L.DomUtil.create('button');
+
+  button.innerHTML = '📍';
+  button.title = 'Find my location';
+
+  button.style.background = 'white';
+  button.style.border = '2px solid #ccc';
+  button.style.borderRadius = '5px';
+  button.style.padding = '10px';
+  button.style.cursor = 'pointer';
+  button.style.fontSize = '20px';
+
+  L.DomEvent.disableClickPropagation(button);
+
+  L.DomEvent.on(button, 'click', function (e) {
+    L.DomEvent.stop(e);
+
+    if (!navigator.geolocation) {
+      alert('Geolocation is not supported by your browser.');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      function (position) {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        currentMapLat = lat;
+        currentMapLng = lng;
+
+        questMap.setView([lat, lng], 15);
+
+        if (userLocationMarker) {
+          userLocationMarker.setLatLng([lat, lng]);
+        } else {
+          userLocationMarker = L.marker([lat, lng], { icon: userPinIcon })
+            .addTo(questMap)
+            .bindPopup('You are here');
+        }
+        userLocationMarker.openPopup();
+        // Load sports facilities near the user's current location.
+        loadSportsLocations(lat, lng);
+      },
+      function (error) {
+        alert('Unable to get your location: ' + error.message);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000
+      }
+    );
+  });
+
+  return button;
+};
+
+locationControl.addTo(questMap);
+  // OpenStreetMap tiles
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(questMap);
+
+  // Fix map sizing after rendering
+  setTimeout(() => {
+    if (questMap) questMap.invalidateSize();
+  }, 100);
+  // Load real sports facilities from OpenStreetMap.
+  loadSportsLocations(currentMapLat, currentMapLng);
+}
+// ---------- Display sports markers ----------
+function displaySportsMarkers({ updateStatus = true } = {}) {
+    if (!questMap || !sportsMarkers) return;
+
+    // Clear existing sports markers
+    sportsMarkers.clearLayers();
+
+    let markerCount = 0;
+    cachedSportsLocations.forEach(place => {
+        const lat = place.lat ?? place.center?.lat;
+        const lng = place.lon ?? place.center?.lon;
+
+        if (lat == null || lng == null) return;
+
+        const sport = place.tags?.sport || '';
+        const identity = facilityIdentity(place.tags);
+
+        if (!matchesSportFilter(sport, selectedSport)) return;
+
+        // Create popup
+        const popup = document.createElement('div');
+
+        const title = document.createElement('strong');
+        title.textContent = identity.displayName;
+
+        const description = document.createElement('p');
+        description.textContent = `Sport: ${sport || 'Not specified'}`;
+
+        popup.append(title, description);
+
+        const addDetail = (label, value) => {
+          if (!value) return;
+          const detail = document.createElement('p');
+          detail.className = 'facility-detail';
+          detail.textContent = `${label}: ${value}`;
+          popup.append(detail);
+        };
+        if (identity.nameSource !== 'brand') addDetail('Brand', identity.brand);
+        if (identity.nameSource !== 'operator') addDetail('Operator', identity.operator);
+        if (identity.nameSource !== 'club') addDetail('Club', identity.club);
+        addDetail('Address', identity.address);
+        addDetail('Location', `${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)}`);
+        if (identity.nameSource === 'missing') addDetail('Note', 'This facility has no name recorded in OpenStreetMap.');
+
+        const mapLink = document.createElement('a');
+        mapLink.href = `https://www.openstreetmap.org/?mlat=${encodeURIComponent(lat)}&mlon=${encodeURIComponent(lng)}#map=18/${lat}/${lng}`;
+        mapLink.target = '_blank';
+        mapLink.rel = 'noopener noreferrer';
+        mapLink.textContent = 'Open this location in OpenStreetMap';
+        popup.append(mapLink);
+
+        // Add marker
+        L.marker([lat, lng], { icon: facilityPinIcon })
+            .addTo(sportsMarkers)
+            .bindPopup(popup);
+        markerCount += 1;
+    });
+
+    if (updateStatus && !sportsLoading) setMapStatus(markerCount ? 'success' : 'empty', resultsStatus(markerCount));
+    return markerCount;
+}
+// ---------- Fetch real sports locations ----------
+async function loadSportsLocations(lat = -33.8688, lng = 151.2093) {
+  if (!questMap) return;
+  currentMapLat = lat;
+  currentMapLng = lng;
+  const requestId = ++sportsRequestId;
+  if (sportsFetchController) sportsFetchController.abort();
+  sportsFetchController = new AbortController();
+  sportsLoading = true;
+
+  // Never leave markers from a previous location visible while a new
+  // request is in progress.
+  if (sportsMarkers) {
+    sportsMarkers.clearLayers();
+  }
+  setMapStatus('loading', 'Finding nearby sports facilities…');
+
+  const map = questMap;
+
+  try {
+    let data;
+    let apiError = null;
+    let usedDirectFallback = false;
+
+    try {
+      const response = await fetch(`/api/sports-locations?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`, {
+        signal: sportsFetchController.signal,
+      });
+      const apiData = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(apiData.error || 'Unable to load nearby sports facilities.');
+      }
+      data = { ...apiData, elements: Array.isArray(apiData.elements) ? apiData.elements : [] };
+    } catch (error) {
+      apiError = error;
+    }
+
+    // The browser fallback is used only after the app API fails or returns
+    // no data. It keeps blue facility pins usable during a backend outage.
+    if (apiError || data.elements.length === 0) {
+      try {
+        data = await fetchSportsLocationsDirectly(lat, lng, sportsFetchController.signal);
+        usedDirectFallback = true;
+      } catch (directError) {
+        if (apiError) throw directError;
+        console.warn('Direct OpenStreetMap fallback failed:', directError);
+      }
+    }
+
+    // Ignore an earlier location request that completed after a newer one.
+    if (requestId !== sportsRequestId || questMap !== map) return;
+
+    cachedSportsLocations = Array.isArray(data.elements) ? data.elements : [];
+    sportsLoading = false;
+    const markerCount = displaySportsMarkers({ updateStatus: false });
+    if (usedDirectFallback) {
+      setMapStatus(markerCount ? 'success' : 'empty', `${resultsStatus(markerCount)} Loaded directly from OpenStreetMap.`);
+    } else if (data.stale) {
+      setMapStatus('warning', `${data.warning || 'Live sports data is temporarily unavailable.'} ${resultsStatus(markerCount)}`);
+    } else {
+      setMapStatus(markerCount ? 'success' : 'empty', resultsStatus(markerCount));
+    }
+  } catch (error) {
+    if (error.name === 'AbortError' || requestId !== sportsRequestId) return;
+    // Don't add markers to an old map after switching tabs
+    if (questMap !== map) return;
+    sportsLoading = false;
+    console.error('Error loading sports locations:', error);
+    setMapStatus('error', `${error.message} You can retry when the service is available.`, { retry: true });
+  }
+}
 function renderSearch(){
   const f = state.searchFilters;
   const results = state.searchResults;
@@ -1104,12 +1483,13 @@ function renderMatches(){
 async function render(){
   const app = document.getElementById('app');
 
-  // Modals and toasts get appended directly to document.body (outside
-  // #app) further down, so rebuilding #app's innerHTML never touches
-  // them. Without this cleanup, closing a modal (or any background
-  // re-render while one is open) leaves the old overlay stuck on screen
-  // permanently, blocking the whole page.
-  document.querySelectorAll('.modal-backdrop, .toast').forEach(el => el.remove());
+  // Modals get appended directly to document.body (outside #app) further
+  // down, so rebuilding #app's innerHTML never touches them. Without this
+  // cleanup, closing a modal (or any background re-render while one is
+  // open) leaves the old overlay stuck on screen permanently, blocking the
+  // whole page. Toasts are handled separately (see showToast) and manage
+  // their own removal on a timer, so they're deliberately excluded here.
+  document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
 
   // The whole screen gets rebuilt from scratch on every state change,
   // including on unrelated background events (a live chat push, a toast,
@@ -1135,6 +1515,7 @@ async function render(){
   let tabContent = '';
   if(state.tab === 'discover') tabContent = renderDiscover(self);
   else if(state.tab === 'search') tabContent = renderSearch();
+  else if(state.tab === 'map') tabContent = renderMap();
   else if(state.tab === 'matches') tabContent = renderMatches();
   else if(state.tab === 'profile') tabContent = renderProfile(self);
 
@@ -1178,26 +1559,20 @@ async function render(){
         <button class="btn btn-ghost btn-sm" id="notif-dismiss-btn">Not now</button>
       </div>
     </div>` : ''}
-    <div class="qf-workspace">
-      <aside class="qf-sidebar" aria-label="Main navigation">
-        <div class="qf-side-brand"><div class="qf-side-mark">Q</div><div><strong>QUESTFIT</strong><small>MOVE · CONNECT · GROW</small></div></div>
-        <div class="qf-side-label">YOUR SPACE</div>
-        <nav class="qf-side-nav">
-          <button class="tab qf-nav-item ${state.tab==='discover'?'active':''}" data-tab="discover"><span class="qf-nav-icon">✦</span><span>Discover</span><span class="qf-nav-arrow">›</span></button>
-          <button class="tab qf-nav-item ${state.tab==='search'?'active':''}" data-tab="search"><span class="qf-nav-icon">⌕</span><span>Find Friends</span><span class="qf-nav-arrow">›</span></button>
-          <button class="tab qf-nav-item ${state.tab==='matches'?'active':''}" data-tab="matches"><span class="qf-nav-icon">◈</span><span>Matches & Chat</span><span class="qf-nav-count">${state.myMatches.incoming.length||''}</span></button>
-          <button class="tab qf-nav-item ${state.tab==='profile'?'active':''}" data-tab="profile"><span class="qf-nav-icon">◎</span><span>My Profile</span><span class="qf-nav-arrow">›</span></button>
-        </nav>
-        <div class="qf-sidebar-bottom"><div class="qf-status-dot"></div><span>YOUR QUEST IS ACTIVE</span></div>
-      </aside>
-      <main class="qf-main-content">
-        <div class="qf-page-heading"><div><div class="qf-eyebrow">THE ARENA</div><h1>${({discover:'Discover',search:'Find Friends',matches:'Matches & Chat',profile:'My Profile'})[state.tab]||'QuestFit'}</h1><p>${({discover:'Find your next teammate.',search:'Find people who share your sports.',matches:'Build connections and plan your next game.',profile:'Your journey, your sports, your story.'})[state.tab]||'Move · Connect · Grow'}</p></div><div class="qf-heading-badge">✧ <span>PLAYER HUB</span></div></div>
-        <section class="qf-page-content">${tabContent}</section>
-        <div class="footer-note">QUESTFIT <span>·</span> MOVE · CONNECT · GROW</div>
-      </main>
+    <div class="tabs">
+      <div class="tab ${state.tab==='discover'?'active':''}" data-tab="discover">Discover</div>
+      <div class="tab ${state.tab==='search'?'active':''}" data-tab="search">Search</div>
+      <div class="tab ${state.tab==='map'?'active':''}" data-tab="map">🗺️ Map</div>
+      <div class="tab ${state.tab==='matches'?'active':''}" data-tab="matches">Matches<span class="count">${state.myMatches.incoming.length||''}</span></div>
+      <div class="tab ${state.tab==='profile'?'active':''}" data-tab="profile">Profile</div>
     </div>
+    ${tabContent}
+    <div class="footer-note">Quest Fit · running on your own server, data stored in a cloud Postgres database.</div>
   `;
-
+// Initialise Leaflet when the Map tab is active
+if (state.tab === 'map') {
+  initMap();
+}
   if(state.matchModal){
     const other = state.matchModal;
     document.body.insertAdjacentHTML('beforeend', `
@@ -1262,6 +1637,7 @@ async function render(){
     };
   }
 
+
   if(state.meetupModalOpen && state.meetupForm){
     const f = state.meetupForm;
     document.body.insertAdjacentHTML('beforeend', `
@@ -1301,6 +1677,7 @@ async function render(){
   if(state.toast){
     document.body.insertAdjacentHTML('beforeend', `<div class="toast">${esc(state.toast)}</div>`);
   }
+
 
   if(state.profileModalOpen && state.profileForm){
     const f = state.profileForm;

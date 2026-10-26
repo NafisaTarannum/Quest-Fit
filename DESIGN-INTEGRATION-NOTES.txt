@@ -1,0 +1,20 @@
+QuestFit interface integration notes
+
+What changed:
+- Added public/questfit-design.css to bring the existing working app's interface closer to the supplied QuestFit design language (navy background, mint accents, rounded cards, mobile bottom navigation, styled auth screens).
+- Updated public/index.html to load the new stylesheet after the existing stylesheet.
+- Updated only the loading-state markup in public/app.js to show a branded loading screen.
+
+What was deliberately left unchanged:
+- API helper and API routes
+- Authentication, sessions, database/server files
+- Discover, Search, Map, Matches, chat, profile, posts, meetups and notification logic
+- Existing DOM IDs and data-tab hooks used by the app's event handlers
+
+Validation performed:
+- `node --check public/app.js` passed
+- `node --check server/server.js` passed
+- `npm test` passed (9 tests)
+
+Important:
+This is a source-code patch, not a deployment. Review locally or on a separate preview branch before merging into the team's main branch. No live app or database was changed by preparing this archive.

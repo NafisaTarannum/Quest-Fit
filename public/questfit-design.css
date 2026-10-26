@@ -139,3 +139,4 @@ input:focus,select:focus,textarea:focus{outline:1px solid rgba(134,239,172,.65)!
 .map-legend{background:#17191e!important;color:#e8e3d5!important;border-color:#383227!important;}
 .map-status{background:#17191e!important;color:#86EFAC!important;border-color:#383227!important;}
 @media(max-width:680px){.tabs{background:rgba(17,18,22,.97)!important;}}
+
